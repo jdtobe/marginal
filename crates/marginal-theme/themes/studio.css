@@ -1,0 +1,116 @@
+/* Studio — a clean app look. Geist and Geist Mono; block syntax shows as labels in pills. */
+
+:root {
+  --paper: #ffffff;
+  --ink: #111114;
+  --muted: #5f5f68;
+  --rule: #e5e5ea;
+  --accent: #0a64d8;
+  --glyph: #5f5f68;
+  --chrome: #f6f6f8;
+  --code-bg: #f8f8fa;
+  --pill: #f0f0f3;
+  --selection: rgba(10, 100, 216, 0.16);
+
+  --hl-keyword: #c2185b;
+  --hl-string: #1b7f4d;
+  --hl-function: #0a64d8;
+  --hl-type: #8a4ac2;
+  --hl-number: #b35c00;
+  --hl-comment: #8e8e96;
+  --hl-tag: #0a64d8;
+
+  --marginal-glyph-side: left;
+  --marginal-glyph-style: label;   /* raw | label */
+  --marginal-measure: 640px;
+  --marginal-margin: 104px;
+  --marginal-caret-shape: bar;
+  --marginal-caret-blink: on;
+  --marginal-ol-style: decimal;
+  --marginal-bullet: "•";
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #1c1c1e;
+    --ink: #f2f2f7;
+    --muted: #a1a1a8;
+    --rule: #36363a;
+    --accent: #4c9aff;
+    --glyph: #b0b0b8;
+    --chrome: #161618;
+    --code-bg: #232326;
+    --pill: #2a2a2e;
+    --selection: rgba(76, 154, 255, 0.24);
+    --hl-keyword: #ff6b9a;
+    --hl-string: #6fd49b;
+    --hl-function: #4c9aff;
+    --hl-type: #c49bff;
+    --hl-number: #ffa95c;
+    --hl-comment: #8e8e96;
+    --hl-tag: #4c9aff;
+  }
+}
+
+#write {
+  font-family: "Geist", -apple-system, "Helvetica Neue", sans-serif;
+  font-size: 16.5px;
+  line-height: 1.65;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+p { margin-bottom: 18px; }
+
+h1, h2, h3, h4, h5, h6 { font-weight: 700; line-height: 1.25; margin-top: 12px; margin-bottom: 12px; }
+h1 { font-size: 32px; letter-spacing: -0.02em; }
+h2 { font-size: 24px; letter-spacing: -0.01em; }
+h3 { font-size: 19px; }
+h4, h5, h6 { font-size: 16.5px; }
+
+strong { font-weight: 600; }
+em { font-style: italic; }
+del { text-decoration: line-through; color: var(--muted); }
+a { color: var(--accent); text-decoration: underline; }
+code { font-family: "Geist Mono", Menlo, monospace; font-size: 14px; color: var(--accent); }
+sup { color: var(--accent); font-weight: 600; }
+
+blockquote {
+  background: var(--pill);
+  border-radius: 10px;
+  padding: 10px 16px;
+}
+
+pre {
+  font-family: "Geist Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 18px;
+}
+
+li { margin-bottom: 6px; }
+li.task-done { color: var(--muted); text-decoration: line-through; }
+
+hr { border-bottom: 1px solid var(--rule); margin-bottom: 18px; }
+
+table { font-size: 14px; margin-bottom: 18px; }
+th { font-weight: 600; color: var(--muted); background: var(--pill); padding: 8px 12px; border-bottom: 1px solid var(--rule); }
+td { padding: 8px 12px; border-bottom: 1px solid var(--rule); }
+
+.hl-keyword, .hl-operator { color: var(--hl-keyword); }
+.hl-string, .hl-escape, .hl-string-special { color: var(--hl-string); }
+.hl-function, .hl-constructor { color: var(--hl-function); }
+.hl-type, .hl-attribute, .hl-module { color: var(--hl-type); }
+.hl-number, .hl-boolean, .hl-constant, .hl-property { color: var(--hl-number); }
+.hl-comment { color: var(--hl-comment); font-style: italic; }
+.hl-tag { color: var(--hl-tag); }
+.hl-punctuation, .hl-variable { color: var(--ink); }
+
+.glyph { font-family: "Geist Mono", Menlo, monospace; font-size: 10.5px; font-weight: 500; color: var(--glyph); background: var(--pill); }
+.syntax { font-family: "Geist Mono", Menlo, monospace; color: var(--glyph); }
+.caret { color: var(--accent); }
+.chip { font-family: "Geist", sans-serif; color: var(--accent); }
+.chrome { background: var(--chrome); color: var(--muted); }

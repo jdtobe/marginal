@@ -1,0 +1,26 @@
+[package]
+name = "marginal-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+arboard = { version = "3", default-features = false }
+muda = "0.21"
+marginal-doc = { version = "0.1.0", path = "../marginal-doc" }
+marginal-highlight = { version = "0.1.0", path = "../marginal-highlight" }
+marginal-history = { version = "0.1.0", path = "../marginal-history" }
+marginal-session = { version = "0.1.0", path = "../marginal-session" }
+marginal-theme = { version = "0.1.0", path = "../marginal-theme" }
+parley = "0.12"
+png = "0.18"
+pollster = "1"
+rfd = "0.15"
+unicode-segmentation = "1"
+vello = "0.11"
+winit = "0.30"
+
+[dev-dependencies]
+tempfile = "3"

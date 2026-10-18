@@ -1,0 +1,1026 @@
+//! Lays out a [`Document`] with a [`Theme`]: one parley layout per leaf block, syntax glyphs in
+//! the margin, and a mapping between source offsets and displayed text so the caret can live in
+//! source coordinates while syntax is hidden or revealed around it.
+
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+
+use marginal_doc::{Align, Block, BlockKind, ContainerKind, Document, InlineStyle, Segment, SegmentKind, TableShape};
+use marginal_highlight::Highlighter;
+use marginal_theme::{Appearance, Color, Style, TextTransform, Theme};
+use parley::editing::Cursor;
+use parley::{
+    Affinity, Alignment, AlignmentOptions, FontContext, FontFamily, FontStyle, FontWeight, Layout, LayoutContext,
+    LineHeight, StyleProperty,
+};
+use vello::kurbo::Rect;
+
+/// Text color carried through parley layouts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Brush(pub Color);
+
+impl Default for Brush {
+    fn default() -> Self {
+        Self(Color::BLACK)
+    }
+}
+
+impl Brush {
+    pub fn color(self) -> Color {
+        self.0
+    }
+}
+
+pub struct Fonts {
+    pub font_cx: FontContext,
+    pub layout_cx: LayoutContext<Brush>,
+}
+
+impl Fonts {
+    pub fn new() -> Self {
+        let mut font_cx = FontContext::new();
+        for &data in marginal_theme::BUNDLED_FONTS {
+            font_cx.collection.register_fonts(parley::fontique::Blob::new(std::sync::Arc::new(data)), None);
+        }
+        Self { font_cx, layout_cx: LayoutContext::new() }
+    }
+}
+
+/// One stretch of displayed text and the source bytes it came from.
+#[derive(Clone, Debug)]
+struct MapPiece {
+    display: Range<usize>,
+    source: Range<usize>,
+    /// Display text equals source text byte for byte, so offsets inside map 1:1.
+    exact: bool,
+}
+
+/// A block's marker in the margin, e.g. `##`, `>`, `- [ ]`, ```` ``` ````.
+pub struct Glyph {
+    pub layout: Layout<Brush>,
+    pub x: f32,
+    pub y: f32,
+    /// A background behind the glyph (a pill), when the theme gives `.glyph` one.
+    pub pill: Option<Color>,
+}
+
+pub struct Decoration {
+    pub layout: Layout<Brush>,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Decoration {
+    /// The outline drawn around a chip, which is also its click target.
+    pub fn chip_bounds(&self) -> Rect {
+        let pad = 6.0;
+        Rect::new(
+            (self.x - pad) as f64,
+            (self.y - 2.0) as f64,
+            (self.x + self.layout.width() + pad) as f64,
+            (self.y + self.layout.height() + 2.0) as f64,
+        )
+    }
+}
+
+pub struct BlockView {
+    pub layout: Layout<Brush>,
+    map: Vec<MapPiece>,
+    display_len: usize,
+    /// Top-left of the text.
+    pub text_x: f32,
+    pub text_y: f32,
+    /// The block's box, including padding, for backgrounds and hit testing.
+    pub top: f32,
+    pub bottom: f32,
+    pub box_x: f32,
+    pub box_width: f32,
+    pub style: Style,
+    pub glyph: Option<Glyph>,
+    pub bullet: Option<Decoration>,
+    pub chip: Option<Decoration>,
+    pub quote_bars: Vec<(f32, f32, Color)>,
+    pub rule: bool,
+    /// Set for table cells, which are laid out as blocks of their own.
+    pub cell: Option<CellFrame>,
+}
+
+/// A table cell's position and border colors.
+#[derive(Clone, Copy, Debug)]
+pub struct CellFrame {
+    /// The table's block index in the document.
+    pub table: usize,
+    pub row: usize,
+    pub col: usize,
+    pub border: Color,
+    /// The line under the header row.
+    pub header_rule: Color,
+}
+
+impl BlockView {
+    /// Display index for a source offset. Offsets inside hidden syntax snap to its edges.
+    pub fn display_index(&self, offset: usize) -> usize {
+        display_index_in(&self.map, offset, self.display_len)
+    }
+
+    /// Source offset for a display index.
+    pub fn source_offset(&self, index: usize, affinity: Affinity) -> usize {
+        let candidates: Vec<&MapPiece> = self
+            .map
+            .iter()
+            .filter(|p| !p.display.is_empty() && p.display.start <= index && index <= p.display.end)
+            .collect();
+        // At a boundary, upstream affinity keeps the caret with the text before it.
+        let piece = match affinity {
+            Affinity::Upstream => candidates.iter().find(|p| p.display.end == index).or(candidates.first()),
+            Affinity::Downstream => candidates.iter().find(|p| p.display.start == index).or(candidates.last()),
+        };
+        match piece {
+            Some(p) if p.exact => p.source.start + (index - p.display.start),
+            Some(p) if index == p.display.start => p.source.start,
+            Some(p) => p.source.end,
+            None => self.map.last().map_or(0, |p| p.source.end),
+        }
+    }
+
+    pub fn source_range(&self) -> Range<usize> {
+        let start = self.map.first().map_or(0, |p| p.source.start);
+        let end = self.map.last().map_or(start, |p| p.source.end);
+        start..end
+    }
+}
+
+/// Which syntax is currently shown inline.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Reveal {
+    pub caret: Option<usize>,
+    /// Holding ⌥: show every inline mark in the document.
+    pub xray: bool,
+    /// Uncommitted IME composition, shown inline at the caret.
+    pub preedit: Option<String>,
+}
+
+pub struct CaretBox {
+    pub x: f32,
+    pub y: f32,
+    pub height: f32,
+    pub advance: f32,
+}
+
+pub struct DocView {
+    pub blocks: Vec<BlockView>,
+    pub height: f32,
+}
+
+struct Ctx<'a> {
+    theme: &'a Theme,
+    appearance: Appearance,
+    body: Style,
+}
+
+impl Ctx<'_> {
+    fn style(&self, element: &str, classes: &[&str], parent: &Style) -> Style {
+        self.theme.style(self.appearance, element, classes, Some(parent))
+    }
+}
+
+pub fn layout_document(
+    doc: &Document,
+    theme: &Theme,
+    appearance: Appearance,
+    fonts: &mut Fonts,
+    width: f32,
+    reveal: &Reveal,
+    highlighter: &mut Highlighter,
+) -> DocView {
+    let body = theme.style(appearance, "body", &[], None);
+    let cx = Ctx { theme, appearance, body: body.clone() };
+    let px = |name: &str, default: f32| {
+        theme.var(appearance, name).and_then(|v| v.trim_end_matches("px").trim().parse().ok()).unwrap_or(default)
+    };
+    let gutter = 24.0;
+    let margin = px("--marginal-margin", 96.0);
+    let glyph_right = theme.var(appearance, "--marginal-glyph-side").is_some_and(|s| s.trim() == "right");
+    let measure = px("--marginal-measure", 640.0).min((width - margin - gutter * 2.0).max(200.0));
+    let left = ((width - margin - measure) / 2.0).max(gutter);
+    let content_x = if glyph_right { left } else { left + margin };
+
+    let src = doc.text();
+    let mut views: Vec<BlockView> = Vec::with_capacity(doc.blocks().len());
+    let mut y = 48.0_f32;
+    let mut prev_margin = 0.0_f32;
+    let mut seen_containers = HashSet::new();
+    let mut prev_quote_ids: Vec<usize> = Vec::new();
+
+    // A caret between blocks (e.g. after pressing Enter twice) gets an empty line of its own.
+    let gap = reveal
+        .caret
+        .filter(|&c| !doc.blocks().iter().any(|b| b.range.start <= c && c <= b.range.end))
+        .map(|c| (c, doc.blocks().partition_point(|b| b.range.start <= c)));
+    let place_gap = |at: usize, views: &mut Vec<BlockView>, y: &mut f32, prev_margin: &mut f32, fonts: &mut Fonts| {
+        let Some((c, gi)) = gap else { return };
+        if gi != at {
+            return;
+        }
+        let style = cx.style("p", &[], &body);
+        if !views.is_empty() {
+            *y += prev_margin.max(style.margin_top);
+        }
+        let layout = simple_layout(fonts, "", &style, Some(measure));
+        let height = layout.height().max(style.font_size * style.line_height);
+        views.push(BlockView {
+            layout,
+            map: vec![MapPiece { display: 0..0, source: c..c, exact: false }],
+            display_len: 0,
+            text_x: content_x,
+            text_y: *y,
+            top: *y,
+            bottom: *y + height,
+            box_x: content_x,
+            box_width: measure,
+            style: style.clone(),
+            glyph: None,
+            bullet: None,
+            chip: None,
+            quote_bars: Vec::new(),
+            rule: false,
+            cell: None,
+        });
+        *y += height;
+        *prev_margin = style.margin_bottom;
+    };
+
+    for (index, block) in doc.blocks().iter().enumerate() {
+        place_gap(index, &mut views, &mut y, &mut prev_margin, fonts);
+        // Container chain: indentation, inherited style, glyphs, bullets.
+        let mut style = body.clone();
+        let mut indent = 0.0_f32;
+        let mut glyph_parts: Vec<String> = Vec::new();
+        let mut bullet: Option<(String, Style)> = None;
+        let mut quote_bars_x: Vec<(f32, Color, usize)> = Vec::new();
+        for c in &block.containers {
+            let first = seen_containers.insert(c.id);
+            let marker = src[c.marker.clone()].trim().to_owned();
+            match &c.kind {
+                ContainerKind::Quote => {
+                    style = cx.style("blockquote", &[], &style);
+                    if let Some(b) = style.border_left {
+                        quote_bars_x.push((indent, b.color, c.id));
+                    }
+                    indent += style.padding[3] + style.border_left.map_or(0.0, |b| b.width);
+                    glyph_parts.push(">".into());
+                }
+                ContainerKind::ListItem { ordered, task } => {
+                    let classes: &[&str] = if *task == Some(true) { &["task", "task-done"] } else { &[] };
+                    style = cx.style("li", classes, &style);
+                    let mark = match (task, ordered) {
+                        (Some(true), _) => "[x]".to_owned(),
+                        (Some(false), _) => "[ ]".to_owned(),
+                        (None, Some(n)) => match theme.var(appearance, "--marginal-ol-style").as_deref().map(str::trim)
+                        {
+                            Some("circled") => circled(*n),
+                            Some("padded") => format!("{n:02}"),
+                            _ => format!("{n}."),
+                        },
+                        (None, None) => theme
+                            .var(appearance, "--marginal-bullet")
+                            .map(|b| b.trim().trim_matches(['"', '\'']).to_owned())
+                            .filter(|b| !b.is_empty())
+                            .unwrap_or_else(|| "▸".to_owned()),
+                    };
+                    if first {
+                        let mut bullet_style = cx.style("span", &["bullet"], &style);
+                        bullet_style.strikethrough = false;
+                        if task.is_some() {
+                            bullet_style.color = cx.style("code", &[], &style).color;
+                        } else if ordered.is_some() {
+                            // Numbers sit back in the glyph gray so the text stays loudest.
+                            bullet_style.color = cx.style("span", &["glyph"], &style).color;
+                        }
+                        bullet = Some((mark, bullet_style));
+                        // List markers render inline; the raw syntax only shows under x-ray.
+                        if reveal.xray {
+                            glyph_parts.push(marker);
+                        }
+                    }
+                    indent += style.font_size * 2.6;
+                }
+                ContainerKind::Footnote { label } => {
+                    style = cx.style("footnote", &[], &style);
+                    if first {
+                        glyph_parts.push(format!("[^{label}]:"));
+                    }
+                }
+            }
+        }
+
+        let (element, block_glyph): (String, Option<String>) = match &block.kind {
+            BlockKind::Paragraph => ("p".into(), None),
+            BlockKind::Heading { level, setext } => (
+                format!("h{level}"),
+                Some(if *setext {
+                    if *level == 1 { "===".into() } else { "---".into() }
+                } else {
+                    "#".repeat(*level as usize)
+                }),
+            ),
+            BlockKind::CodeBlock { fenced, .. } => {
+                ("pre".into(), Some(if *fenced { "```".into() } else { "⇥".into() }))
+            }
+            BlockKind::Rule => ("hr".into(), Some(src[block.range.clone()].trim().to_owned())),
+            BlockKind::Html => ("pre".into(), Some("<>".into())),
+            BlockKind::Table => ("table".into(), Some("|".into())),
+            BlockKind::FrontMatter => ("pre".into(), Some("---".into())),
+        };
+        style = cx.style(&element, &[], &style);
+        if let Some(g) = block_glyph {
+            glyph_parts.push(g);
+        }
+
+        let collapsed = prev_margin.max(style.margin_top);
+        if index > 0 {
+            y += collapsed;
+        }
+        let top = y;
+        let box_x = content_x + indent;
+        let box_width = (measure - indent).max(40.0);
+        let text_width = (box_width - style.padding[1] - style.padding[3]).max(20.0);
+        let text_x = box_x + style.padding[3];
+        let text_y = top + style.padding[0];
+
+        let table = block.table.as_deref().filter(|_| block.kind == BlockKind::Table);
+        if let Some(shape) = table.filter(|_| !reveal.xray) {
+            let mut cells = layout_table(fonts, &cx, src, block, index, shape, reveal, &style, box_x, box_width, top);
+            if let Some(first) = cells.first_mut() {
+                let baseline = first.layout.lines().next().map_or(style.font_size, |l| l.metrics().baseline);
+                first.glyph = make_glyph(fonts, &cx, &glyph_parts, first.text_y + baseline, content_x, measure);
+            }
+            for cell in cells.iter_mut().filter(|c| c.cell.is_some_and(|f| f.col == 0)) {
+                cell.quote_bars = quote_bars_x.iter().map(|&(x, color, _)| (content_x + x, cell.top, color)).collect();
+            }
+            prev_quote_ids = quote_bars_x.iter().map(|q| q.2).collect();
+            y = cells.iter().map(|c| c.bottom).fold(top, f32::max);
+            views.extend(cells);
+            prev_margin = style.margin_bottom;
+            continue;
+        }
+        // Under x-ray a table shows its source, pipes and all.
+        let raw;
+        let shown = if table.is_some() {
+            raw = Block {
+                segments: vec![Segment {
+                    range: block.range.clone(),
+                    kind: SegmentKind::Text { style: InlineStyle::RAW },
+                }],
+                ..block.clone()
+            };
+            &raw
+        } else {
+            block
+        };
+        let (display, map, mut spans) = build_display(src, shown, reveal);
+        if let BlockKind::CodeBlock { info, .. } = &block.kind
+            && let Some(lang) = info.split_whitespace().next()
+        {
+            spans.extend(
+                highlighter.highlight(lang, &display).into_iter().map(|s| (s.range, Span::Highlight(s.capture))),
+            );
+        }
+        let display = transform_text(display, style.text_transform);
+        let layout = build_layout(fonts, &cx, &display, &spans, &style, text_width);
+        let text_height = if block.kind == BlockKind::Rule { style.font_size * 0.5 } else { layout.height() };
+        let bottom = text_y + text_height + style.padding[2];
+
+        let first_baseline = layout.lines().next().map_or(style.font_size, |l| l.metrics().baseline);
+        let glyph = make_glyph(fonts, &cx, &glyph_parts, text_y + first_baseline, content_x, measure);
+        let bullet = bullet.map(|(mark, bstyle)| {
+            let bl = simple_layout(fonts, &mark, &bstyle, None);
+            let baseline = bl.lines().next().map_or(0.0, |l| l.metrics().baseline);
+            // Right-aligned against the text so wide markers like `[x]` keep a gap.
+            Decoration {
+                x: box_x - bl.width() - bstyle.font_size * 0.6,
+                y: text_y + first_baseline - baseline,
+                layout: bl,
+            }
+        });
+        let caret_inside = reveal.caret.is_some_and(|c| block.range.start <= c && c <= block.range.end);
+        let chip = match &block.kind {
+            BlockKind::CodeBlock { info, fenced: true } if caret_inside => {
+                let label = if info.is_empty() {
+                    "plain ▾".to_owned()
+                } else {
+                    format!("{} ▾", info.split_whitespace().next().unwrap_or(""))
+                };
+                let chip_style = cx.style("span", &["chip"], &cx.style("span", &["glyph"], &style));
+                let cl = simple_layout(fonts, &label, &chip_style, None);
+                Some(Decoration { x: box_x + box_width - cl.width() - 10.0, y: top + 6.0, layout: cl })
+            }
+            _ => None,
+        };
+
+        // Quote bars run continuously through consecutive blocks of the same quote.
+        let quote_bars = quote_bars_x
+            .iter()
+            .map(|&(x, color, id)| {
+                let joined = prev_quote_ids.contains(&id);
+                (content_x + x, if joined { top - collapsed } else { top }, color)
+            })
+            .collect::<Vec<_>>();
+        prev_quote_ids = quote_bars_x.iter().map(|q| q.2).collect();
+
+        views.push(BlockView {
+            display_len: display.len(),
+            layout,
+            map,
+            text_x,
+            text_y,
+            top,
+            bottom,
+            box_x,
+            box_width,
+            style: style.clone(),
+            glyph,
+            bullet,
+            chip,
+            quote_bars,
+            rule: block.kind == BlockKind::Rule,
+            cell: None,
+        });
+        y = bottom;
+        prev_margin = style.margin_bottom;
+    }
+
+    place_gap(doc.blocks().len(), &mut views, &mut y, &mut prev_margin, fonts);
+
+    DocView { blocks: views, height: y + prev_margin + 240.0 }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Span {
+    Content(InlineStyle),
+    Syntax,
+    Preedit,
+    /// A tree-sitter capture in a code block, like `keyword` or `function.method`.
+    Highlight(&'static str),
+}
+
+/// A block's display text, its map back to the source, and its styled spans.
+type Display = (String, Vec<MapPiece>, Vec<(Range<usize>, Span)>);
+
+fn build_display(src: &str, block: &Block, reveal: &Reveal) -> Display {
+    let revealed: HashSet<usize> = match reveal.caret {
+        _ if reveal.xray => (0..block.inlines.len()).collect(),
+        Some(c) => block.inlines_at(c).into_iter().collect(),
+        None => HashSet::new(),
+    };
+    let mut display = String::new();
+    let mut map = Vec::new();
+    let mut spans = Vec::new();
+    let mut push = |display: &mut String, text: &str, source: Range<usize>, exact: bool, span: Option<Span>| {
+        let start = display.len();
+        display.push_str(text);
+        map.push(MapPiece { display: start..display.len(), source, exact });
+        if let Some(span) = span
+            && !text.is_empty()
+        {
+            spans.push((start..display.len(), span));
+        }
+    };
+
+    // Trailing newlines of the last visible text (code blocks) are hidden.
+    let last_visible = block.segments.iter().rposition(|s| !matches!(s.kind, SegmentKind::Syntax { .. }));
+    for (i, seg) in block.segments.iter().enumerate() {
+        let text = &src[seg.range.clone()];
+        match &seg.kind {
+            SegmentKind::Text { style } => {
+                let trailing = Some(i) == last_visible && text.ends_with('\n');
+                if trailing || style.contains(InlineStyle::RAW) {
+                    let trimmed = text.trim_end_matches(['\n', '\r']);
+                    let cut = seg.range.start + trimmed.len();
+                    push(&mut display, trimmed, seg.range.start..cut, true, Some(Span::Content(*style)));
+                    push(&mut display, "", cut..seg.range.end, false, None);
+                } else {
+                    push(&mut display, text, seg.range.clone(), true, Some(Span::Content(*style)));
+                }
+            }
+            SegmentKind::Replaced { text, style } => {
+                push(&mut display, text, seg.range.clone(), false, Some(Span::Content(*style)))
+            }
+            SegmentKind::Break { hard } => {
+                push(&mut display, if *hard { "\n" } else { " " }, seg.range.clone(), false, None)
+            }
+            SegmentKind::Syntax { owner: Some(owner) } if revealed.contains(owner) => {
+                push(&mut display, text, seg.range.clone(), true, Some(Span::Syntax))
+            }
+            SegmentKind::Syntax { .. } => push(&mut display, "", seg.range.clone(), false, None),
+        }
+    }
+    if let (Some(preedit), Some(c)) = (reveal.preedit.as_deref(), reveal.caret)
+        && block.range.start <= c
+        && c <= block.range.end
+        && !preedit.is_empty()
+    {
+        insert_preedit(&mut display, &mut map, &mut spans, c, preedit);
+    }
+    (display, map, spans)
+}
+
+fn display_index_in(map: &[MapPiece], offset: usize, len: usize) -> usize {
+    let mut best = 0;
+    for p in map {
+        if offset < p.source.start {
+            break;
+        }
+        if offset <= p.source.end {
+            best = if p.exact {
+                p.display.start + (offset - p.source.start)
+            } else if offset == p.source.start {
+                p.display.start
+            } else {
+                p.display.end
+            };
+            if offset < p.source.end {
+                break;
+            }
+        } else {
+            best = p.display.end;
+        }
+    }
+    best.min(len)
+}
+
+/// Splices IME composition text into the display at the caret, shifting everything after it.
+fn insert_preedit(
+    display: &mut String,
+    map: &mut Vec<MapPiece>,
+    spans: &mut Vec<(Range<usize>, Span)>,
+    caret: usize,
+    preedit: &str,
+) {
+    let at = display_index_in(map, caret, display.len());
+    let len = preedit.len();
+    display.insert_str(at, preedit);
+    let mut pieces = Vec::with_capacity(map.len() + 2);
+    for p in map.drain(..) {
+        if p.display.start >= at && !(p.display.is_empty() && p.source.end <= caret) {
+            pieces.push(MapPiece { display: p.display.start + len..p.display.end + len, ..p });
+        } else if p.display.end > at {
+            // An exact piece straddling the caret splits around the composition.
+            let cut = p.source.start + (at - p.display.start);
+            pieces.push(MapPiece { display: p.display.start..at, source: p.source.start..cut, exact: true });
+            pieces.push(MapPiece { display: at + len..p.display.end + len, source: cut..p.source.end, exact: true });
+        } else {
+            pieces.push(p);
+        }
+    }
+    let pos =
+        pieces.iter().position(|p| p.display.start >= at + len && p.source.start >= caret).unwrap_or(pieces.len());
+    pieces.insert(pos, MapPiece { display: at..at + len, source: caret..caret, exact: false });
+    *map = pieces;
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    for (r, span) in spans.drain(..) {
+        if r.start >= at {
+            out.push((r.start + len..r.end + len, span));
+        } else if r.end > at {
+            out.push((r.start..at, span));
+            out.push((at + len..r.end + len, span));
+        } else {
+            out.push((r, span));
+        }
+    }
+    out.push((at..at + len, Span::Preedit));
+    *spans = out;
+}
+
+/// Inline marker for ordered items: ① … ⑳, then plain numbers.
+fn circled(n: u64) -> String {
+    match n {
+        1..=20 => char::from_u32(0x2460 + n as u32 - 1).map_or(format!("{n}."), String::from),
+        _ => format!("{n}."),
+    }
+}
+
+fn transform_text(text: String, transform: TextTransform) -> String {
+    let changed = match transform {
+        TextTransform::None => return text,
+        TextTransform::Uppercase => text.to_uppercase(),
+        TextTransform::Lowercase => text.to_lowercase(),
+    };
+    // Only when byte offsets are preserved; otherwise the source map would break.
+    if changed.len() == text.len() && changed.char_indices().map(|(i, _)| i).eq(text.char_indices().map(|(i, _)| i)) {
+        changed
+    } else {
+        text
+    }
+}
+
+fn inline_style(cx: &Ctx, base: &Style, flags: InlineStyle) -> Style {
+    let mut style = base.clone();
+    for (flag, element) in [
+        (InlineStyle::STRONG, "strong"),
+        (InlineStyle::EMPHASIS, "em"),
+        (InlineStyle::STRIKE, "del"),
+        (InlineStyle::LINK, "a"),
+        (InlineStyle::CODE, "code"),
+        (InlineStyle::MATH, "code"),
+        (InlineStyle::HTML, "code"),
+        (InlineStyle::SUPERSCRIPT, "sup"),
+        (InlineStyle::IMAGE_ALT, "em"),
+    ] {
+        if flags.contains(flag) {
+            let next = cx.style(element, &[], &style);
+            style = Style {
+                // Inline elements don't take block decorations.
+                background: next.background,
+                margin_top: 0.0,
+                margin_bottom: 0.0,
+                padding: [0.0; 4],
+                border_left: None,
+                border_bottom: None,
+                ..next
+            };
+        }
+    }
+    style
+}
+
+/// The margin glyph for a block, its baseline at `baseline_y`. Themes choose the side
+/// (`--marginal-glyph-side`) and whether it shows raw syntax or a word (`--marginal-glyph-style:
+/// label`); a `.glyph` background draws it as a pill.
+fn make_glyph(
+    fonts: &mut Fonts,
+    cx: &Ctx,
+    parts: &[String],
+    baseline_y: f32,
+    content_x: f32,
+    measure: f32,
+) -> Option<Glyph> {
+    let var = |name: &str| cx.theme.var(cx.appearance, name).map(|v| v.trim().to_owned());
+    let text = if var("--marginal-glyph-style").as_deref() == Some("label") {
+        glyph_label(parts.last()?)
+    } else {
+        (!parts.is_empty()).then(|| parts.join(" "))?
+    };
+    let style = cx.style("span", &["glyph"], &cx.body);
+    let layout = simple_layout(fonts, &text, &style, None);
+    let baseline = layout.lines().next().map_or(0.0, |l| l.metrics().baseline);
+    let pad = if style.background.is_some() { style.font_size * 0.7 } else { 0.0 };
+    let x = if var("--marginal-glyph-side").as_deref() == Some("right") {
+        content_x + measure + 24.0 + pad
+    } else {
+        content_x - 22.0 - pad - layout.width()
+    };
+    Some(Glyph { x, y: baseline_y - baseline, layout, pill: style.background })
+}
+
+/// A word for a block's syntax, for themes that label blocks instead of showing raw Markdown.
+fn glyph_label(syntax: &str) -> String {
+    let label = match syntax {
+        ">" => "Quote",
+        "```" | "⇥" => "Code",
+        "|" => "Table",
+        "<>" => "HTML",
+        "===" => "H1",
+        "---" | "***" | "___" => "Rule",
+        s if s.starts_with("[^") => "Note",
+        s if !s.is_empty() && s.chars().all(|c| c == '#') => return format!("H{}", s.len()),
+        s if s.starts_with('-') || s.starts_with('*') || s.starts_with('+') || s.ends_with('.') || s.ends_with(')') => {
+            "List"
+        }
+        s => return s.to_owned(),
+    };
+    label.to_owned()
+}
+
+/// Lays out a table as a grid of cell views, one per cell, in row-major order. Each cell's
+/// source map covers just its text, so the caret moves cell to cell and never into the pipes.
+#[allow(clippy::too_many_arguments)]
+fn layout_table(
+    fonts: &mut Fonts,
+    cx: &Ctx,
+    src: &str,
+    block: &Block,
+    index: usize,
+    shape: &TableShape,
+    reveal: &Reveal,
+    table_style: &Style,
+    box_x: f32,
+    box_width: f32,
+    top: f32,
+) -> Vec<BlockView> {
+    let cell_style = |element: &str| {
+        let mut s = cx.style(element, &[], table_style);
+        if s.padding == [0.0; 4] {
+            s.padding = [4.0, 10.0, 4.0, 10.0];
+        }
+        s
+    };
+    let (th, td) = (cell_style("th"), cell_style("td"));
+    let border = td.border_bottom.map_or(td.color.with_alpha(0.25), |b| b.color);
+    let header_rule = th.border_bottom.map_or(border, |b| b.color);
+    let cols = shape.aligns.len();
+
+    struct Prepared {
+        display: String,
+        map: Vec<MapPiece>,
+        spans: Vec<(Range<usize>, Span)>,
+        layout: Layout<Brush>,
+    }
+    let mut grid: Vec<Vec<Option<Prepared>>> = Vec::new();
+    for (r, row) in shape.rows.iter().enumerate() {
+        let style = if r == 0 { &th } else { &td };
+        let mut cells = Vec::new();
+        for c in 0..cols {
+            let Some(range) = row.get(c).map(|cr| marginal_doc::cell_content(src, cr.clone())) else {
+                cells.push(None);
+                continue;
+            };
+            let (display, mut map, spans) = build_display(src, &block.sub_block(range.clone()), reveal);
+            if map.is_empty() {
+                map.push(MapPiece { display: 0..0, source: range.clone(), exact: false });
+            }
+            let layout = build_layout(fonts, cx, &display, &spans, style, 1e6);
+            cells.push(Some(Prepared { display, map, spans, layout }));
+        }
+        grid.push(cells);
+    }
+
+    // Columns take their natural width, shrinking proportionally (and wrapping) when the table
+    // is wider than the page.
+    let pad_x = |s: &Style| s.padding[1] + s.padding[3];
+    let min_width = td.font_size * 2.0 + pad_x(&td);
+    let mut widths: Vec<f32> = (0..cols)
+        .map(|c| {
+            grid.iter()
+                .enumerate()
+                .filter_map(|(r, row)| {
+                    let p = row[c].as_ref()?;
+                    Some(p.layout.width() + pad_x(if r == 0 { &th } else { &td }))
+                })
+                .fold(min_width, f32::max)
+        })
+        .collect();
+    let total: f32 = widths.iter().sum();
+    if total > box_width {
+        let scale = box_width / total;
+        for w in &mut widths {
+            *w = (*w * scale).max(min_width);
+        }
+    }
+
+    let mut views = Vec::new();
+    let mut y = top;
+    for (r, row) in grid.into_iter().enumerate() {
+        let style = if r == 0 { &th } else { &td };
+        let mut prepared = Vec::new();
+        for (c, cell) in row.into_iter().enumerate() {
+            let Some(mut p) = cell else { continue };
+            let inner = widths[c] - pad_x(style);
+            let alignment = match shape.aligns[c] {
+                Align::Center => Alignment::Center,
+                Align::Right => Alignment::End,
+                Align::None | Align::Left => Alignment::Start,
+            };
+            if p.layout.width() > inner || alignment != Alignment::Start {
+                p.layout = build_layout(fonts, cx, &p.display, &p.spans, style, inner);
+                p.layout.align(alignment, AlignmentOptions::default());
+            }
+            prepared.push((c, p));
+        }
+        let height =
+            prepared.iter().map(|(_, p)| p.layout.height()).fold(style.font_size * style.line_height, f32::max)
+                + style.padding[0]
+                + style.padding[2];
+        for (c, p) in prepared {
+            let x = box_x + widths[..c].iter().sum::<f32>();
+            views.push(BlockView {
+                display_len: p.display.len(),
+                layout: p.layout,
+                map: p.map,
+                text_x: x + style.padding[3],
+                text_y: y + style.padding[0],
+                top: y,
+                bottom: y + height,
+                box_x: x,
+                box_width: widths[c],
+                style: Style { background: None, border_bottom: None, ..style.clone() },
+                glyph: None,
+                bullet: None,
+                chip: None,
+                quote_bars: Vec::new(),
+                rule: false,
+                cell: Some(CellFrame { table: index, row: r, col: c, border, header_rule }),
+            });
+        }
+        y += height;
+    }
+    views
+}
+
+/// The theme's style for a highlight capture. `function.method` matches `.hl-function` and,
+/// more specifically, `.hl-function-method`.
+fn capture_style(cx: &Ctx, base: &Style, capture: &str) -> Style {
+    let parts: Vec<&str> = capture.split('.').collect();
+    let classes: Vec<String> = (1..=parts.len()).map(|n| format!("hl-{}", parts[..n].join("-"))).collect();
+    let classes: Vec<&str> = classes.iter().map(String::as_str).collect();
+    let next = cx.style("span", &classes, base);
+    Style { color: next.color, italic: next.italic, font_weight: next.font_weight, ..base.clone() }
+}
+
+fn push_style<'a>(builder: &mut parley::RangedBuilder<'a, Brush>, style: &'a Style, range: Option<Range<usize>>) {
+    let props: [StyleProperty<'a, Brush>; 8] = [
+        StyleProperty::FontFamily(FontFamily::Source(style.font_family.as_str().into())),
+        StyleProperty::FontSize(style.font_size),
+        StyleProperty::FontWeight(FontWeight::new(style.font_weight)),
+        StyleProperty::FontStyle(if style.italic { FontStyle::Italic } else { FontStyle::Normal }),
+        StyleProperty::Brush(Brush(style.color.with_alpha(style.opacity))),
+        StyleProperty::Underline(style.underline),
+        StyleProperty::Strikethrough(style.strikethrough),
+        StyleProperty::LetterSpacing(style.letter_spacing),
+    ];
+    for prop in props {
+        match &range {
+            Some(r) => builder.push(prop, r.clone()),
+            None => builder.push_default(prop),
+        }
+    }
+    let lh = StyleProperty::LineHeight(LineHeight::FontSizeRelative(style.line_height));
+    match &range {
+        Some(r) => builder.push(lh, r.clone()),
+        None => builder.push_default(lh),
+    }
+}
+
+fn build_layout(
+    fonts: &mut Fonts,
+    cx: &Ctx,
+    text: &str,
+    spans: &[(Range<usize>, Span)],
+    base: &Style,
+    width: f32,
+) -> Layout<Brush> {
+    let syntax_style = {
+        let mut s = cx.style("span", &["syntax"], base);
+        s.font_size = base.font_size * 0.85;
+        s
+    };
+    let mut captures: HashMap<&str, Style> = HashMap::new();
+    let styles: Vec<(Range<usize>, Style)> = spans
+        .iter()
+        .filter_map(|(range, span)| match span {
+            Span::Content(flags) if *flags == InlineStyle::empty() => None,
+            Span::Content(flags) => Some((range.clone(), inline_style(cx, base, *flags))),
+            Span::Syntax => Some((range.clone(), syntax_style.clone())),
+            Span::Preedit => Some((range.clone(), Style { underline: true, ..base.clone() })),
+            Span::Highlight(capture) => Some((
+                range.clone(),
+                captures.entry(capture).or_insert_with(|| capture_style(cx, base, capture)).clone(),
+            )),
+        })
+        .collect();
+    let mut builder = fonts.layout_cx.ranged_builder(&mut fonts.font_cx, text, 1.0, true);
+    push_style(&mut builder, base, None);
+    for (range, style) in &styles {
+        push_style(&mut builder, style, Some(range.clone()));
+    }
+    let mut layout = builder.build(text);
+    layout.break_all_lines(Some(width));
+    layout.align(Alignment::Start, AlignmentOptions::default());
+    layout
+}
+
+pub fn simple_layout(fonts: &mut Fonts, text: &str, style: &Style, width: Option<f32>) -> Layout<Brush> {
+    let mut builder = fonts.layout_cx.ranged_builder(&mut fonts.font_cx, text, 1.0, true);
+    push_style(&mut builder, style, None);
+    let mut layout = builder.build(text);
+    layout.break_all_lines(width);
+    layout.align(Alignment::Start, AlignmentOptions::default());
+    layout
+}
+
+impl DocView {
+    /// The block view whose source range contains `offset`, or the nearest preceding one.
+    pub fn block_for_offset(&self, offset: usize) -> Option<&BlockView> {
+        if let Some(b) = self.blocks.iter().find(|b| {
+            let r = b.source_range();
+            r.start <= offset && offset <= r.end
+        }) {
+            return Some(b);
+        }
+        let i = self.blocks.partition_point(|b| b.source_range().start <= offset);
+        self.blocks.get(i.saturating_sub(1)).or(self.blocks.first())
+    }
+
+    /// Caret position plus the width of the character it sits before (for block carets).
+    pub fn caret_box(&self, offset: usize) -> Option<CaretBox> {
+        let b = self.block_for_offset(offset)?;
+        let idx = b.display_index(offset.clamp(b.source_range().start, b.source_range().end));
+        let cursor = Cursor::from_byte_index(&b.layout, idx, Affinity::Downstream);
+        let geom = cursor.geometry(&b.layout, 2.0);
+        let advance = cursor
+            .downstream_cluster(&b.layout)
+            .filter(|c| !c.is_hard_line_break() && !c.is_soft_line_break())
+            .map(|c| c.advance())
+            .filter(|a| *a > 0.0)
+            .unwrap_or(b.style.font_size * 0.6);
+        Some(CaretBox {
+            x: b.text_x + geom.x0 as f32,
+            y: b.text_y + geom.y0 as f32,
+            height: (geom.y1 - geom.y0) as f32,
+            advance,
+        })
+    }
+
+    /// Rectangles covering the source range `sel`, in document coordinates.
+    pub fn selection_rects(&self, sel: Range<usize>) -> Vec<(f32, f32, f32, f32)> {
+        let mut rects = Vec::new();
+        if sel.is_empty() {
+            return rects;
+        }
+        for b in &self.blocks {
+            let r = b.source_range();
+            if r.end < sel.start || r.start > sel.end {
+                continue;
+            }
+            let a = b.display_index(sel.start.max(r.start));
+            let z = b.display_index(sel.end.min(r.end));
+            let selection = parley::editing::Selection::new(
+                Cursor::from_byte_index(&b.layout, a, Affinity::Downstream),
+                Cursor::from_byte_index(&b.layout, z, Affinity::Upstream),
+            );
+            for (bb, _) in selection.geometry(&b.layout) {
+                rects.push((
+                    b.text_x + bb.x0 as f32,
+                    b.text_y + bb.y0 as f32,
+                    b.text_x + bb.x1 as f32,
+                    b.text_y + bb.y1 as f32,
+                ));
+            }
+            // Selection continuing past this block: mark the line end so the break is visible.
+            if sel.end > r.end {
+                let geom = Cursor::from_byte_index(&b.layout, z, Affinity::Upstream).geometry(&b.layout, 0.0);
+                let x = b.text_x + geom.x0 as f32;
+                rects.push((x, b.text_y + geom.y0 as f32, x + b.style.font_size * 0.5, b.text_y + geom.y1 as f32));
+            }
+        }
+        rects
+    }
+
+    /// Among the blocks sharing block `i`'s row (table cells), the one nearest `x`.
+    fn nearest_in_row(&self, i: usize, x: f32) -> &BlockView {
+        let top = self.blocks[i].top;
+        let distance = |b: &BlockView| (b.box_x - x).max(x - (b.box_x + b.box_width)).max(0.0);
+        let row_start = self.blocks[..i].iter().rposition(|b| b.top != top).map_or(0, |j| j + 1);
+        self.blocks[row_start..]
+            .iter()
+            .take_while(|b| b.top == top)
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+            .unwrap_or(&self.blocks[i])
+    }
+
+    /// The offset one visual line above or below `offset`, nearest to `x`. Walks parley lines
+    /// rather than probing pixels, so block margins and padding never trap the caret.
+    pub fn vertical_neighbor(&self, offset: usize, x: f32, down: bool) -> Option<usize> {
+        let i = self.blocks.iter().position(|b| {
+            let r = b.source_range();
+            r.start <= offset && offset <= r.end
+        })?;
+        let b = &self.blocks[i];
+        let idx = b.display_index(offset);
+        let geom = Cursor::from_byte_index(&b.layout, idx, Affinity::Downstream).geometry(&b.layout, 1.0);
+        let mid = ((geom.y0 + geom.y1) / 2.0) as f32;
+        let lines: Vec<_> = b.layout.lines().map(|l| *l.metrics()).collect();
+        let line = lines.iter().position(|m| mid < m.block_max_coord).unwrap_or(lines.len().saturating_sub(1));
+        // Leaving a block goes to the next row of blocks: the neighbor paragraph, or the cell
+        // in the same column of a table.
+        let row_above = || self.blocks[..i].iter().rposition(|o| o.top < b.top).map(|j| self.nearest_in_row(j, x));
+        let row_below = || self.blocks[i..].iter().position(|o| o.top > b.top).map(|j| self.nearest_in_row(i + j, x));
+        let (block, line) = match (down, line) {
+            (false, 0) => {
+                let prev = row_above()?;
+                (prev, prev.layout.lines().count().saturating_sub(1))
+            }
+            (false, l) => (b, l - 1),
+            (true, l) if l + 1 < lines.len() => (b, l + 1),
+            (true, _) => (row_below()?, 0),
+        };
+        let m = block.layout.lines().nth(line).map(|l| *l.metrics()).unwrap_or_default();
+        let y = (m.block_min_coord + m.block_max_coord) / 2.0;
+        let cursor = Cursor::from_point(&block.layout, x - block.text_x, y);
+        Some(block.source_offset(cursor.index(), cursor.affinity()))
+    }
+
+    /// Whether a point in document coordinates is on a code block's language chip.
+    pub fn chip_at(&self, x: f32, y: f32) -> bool {
+        self.blocks.iter().filter_map(|b| b.chip.as_ref()).any(|c| c.chip_bounds().contains((x as f64, y as f64)))
+    }
+
+    /// Source offset under a point in document coordinates.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<usize> {
+        let first = self.blocks.iter().position(|b| y < b.bottom).unwrap_or(self.blocks.len().checked_sub(1)?);
+        // Table cells share a row band; pick the one under (or nearest to) the pointer.
+        let b = self.nearest_in_row(first, x);
+        let cursor = Cursor::from_point(&b.layout, x - b.text_x, (y - b.text_y).max(0.0));
+        Some(b.source_offset(cursor.index(), cursor.affinity()))
+    }
+}

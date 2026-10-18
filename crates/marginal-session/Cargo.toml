@@ -1,0 +1,17 @@
+[package]
+name = "marginal-session"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dirs = "6"
+marginal-doc = { version = "0.1.0", path = "../marginal-doc" }
+marginal-history = { version = "0.1.0", path = "../marginal-history" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

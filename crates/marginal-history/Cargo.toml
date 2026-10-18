@@ -1,0 +1,10 @@
+[package]
+name = "marginal-history"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+marginal-doc = { version = "0.1.0", path = "../marginal-doc" }
+serde = { version = "1", features = ["derive"] }

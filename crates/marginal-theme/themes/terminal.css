@@ -1,0 +1,123 @@
+/* Terminal — Marginal's default theme. Monospace throughout, dark first. */
+
+:root {
+  --paper: #0e1116;
+  --ink: #c9d1d9;
+  --muted: #8b949e;
+  --rule: #262c36;
+  --accent: #7ee787;
+  --accent-2: #79c0ff;
+  --glyph: #6e7781;
+  --chrome: #0a0d12;
+  --code-bg: #151a21;
+  --selection: rgba(121, 192, 255, 0.25);
+
+  /* Code highlighting. */
+  --hl-keyword: #ff7b72;
+  --hl-string: #a5d6ff;
+  --hl-function: #d2a8ff;
+  --hl-type: #ffa657;
+  --hl-number: #79c0ff;
+  --hl-comment: #8b949e;
+  --hl-tag: #7ee787;
+
+  /* Marginal layout controls. */
+  --marginal-glyph-side: left;
+  --marginal-glyph-style: raw;
+  --marginal-measure: 600px;
+  --marginal-margin: 96px;
+  --marginal-caret-shape: block;   /* bar | block | underline */
+  --marginal-caret-blink: on;      /* on | off */
+  --marginal-ol-style: decimal;     /* decimal (1.) | circled (①) | padded (01) */
+  --marginal-bullet: "▸";          /* the marker for unordered list items */
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --paper: #fafaf7;
+    --ink: #24292f;
+    --muted: #57606a;
+    --rule: #d8dee4;
+    --accent: #1a7f37;
+    --accent-2: #0550ae;
+    --glyph: #6e7781;
+    --chrome: #f0f1ec;
+    --code-bg: #f2f3ee;
+    --selection: rgba(5, 80, 174, 0.18);
+    --hl-keyword: #cf222e;
+    --hl-string: #0a3069;
+    --hl-function: #8250df;
+    --hl-type: #953800;
+    --hl-number: #0550ae;
+    --hl-comment: #6e7781;
+    --hl-tag: #116329;
+  }
+}
+
+#write {
+  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  font-size: 14.5px;
+  line-height: 1.75;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+p { margin-bottom: 20px; }
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--accent-2);
+  font-weight: 700;
+  line-height: 1.3;
+  margin-top: 8px;
+  margin-bottom: 16px;
+}
+h1 { font-size: 26px; text-transform: uppercase; letter-spacing: 0.04em; }
+h2 { font-size: 20px; }
+h3 { font-size: 17px; }
+h4, h5, h6 { font-size: 14.5px; }
+
+strong { font-weight: 700; color: var(--ink); }
+em { font-style: italic; }
+del { text-decoration: line-through; color: var(--muted); }
+a { color: var(--accent-2); text-decoration: underline; }
+code { color: var(--accent); }
+sup { color: var(--accent); }
+
+blockquote {
+  color: var(--muted);
+  font-style: italic;
+  border-left: 2px solid var(--glyph);
+  padding: 0 0 0 14px;
+}
+
+pre {
+  font-size: 13px;
+  line-height: 1.65;
+  background: var(--code-bg);
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+
+li { margin-bottom: 6px; }
+li.task-done { color: var(--muted); text-decoration: line-through; }
+
+hr { border-bottom: 1px solid var(--rule); margin-bottom: 20px; }
+
+table { font-size: 13.5px; color: var(--ink); margin-bottom: 20px; }
+th { font-weight: 700; color: var(--accent-2); padding: 4px 12px; border-bottom: 2px solid var(--glyph); }
+td { padding: 4px 12px; border-bottom: 1px solid var(--rule); }
+
+/* Code highlighting: classes are tree-sitter capture names, dots as dashes (.hl-function-method). */
+.hl-keyword, .hl-operator { color: var(--hl-keyword); }
+.hl-string, .hl-escape, .hl-string-special { color: var(--hl-string); }
+.hl-function, .hl-constructor { color: var(--hl-function); }
+.hl-type, .hl-attribute, .hl-module { color: var(--hl-type); }
+.hl-number, .hl-boolean, .hl-constant, .hl-property { color: var(--hl-number); }
+.hl-comment { color: var(--hl-comment); font-style: italic; }
+.hl-tag { color: var(--hl-tag); }
+.hl-punctuation, .hl-variable { color: var(--ink); }
+
+.glyph { color: var(--glyph); font-size: 13px; }
+.syntax { color: var(--glyph); }
+.caret { color: var(--accent); }
+.chrome { background: var(--chrome); color: var(--muted); }

@@ -1,0 +1,115 @@
+/* Editorial — a magazine spread. Fraunces display over Instrument Sans; glyphs sit in a right
+   column like marginal notes. */
+
+:root {
+  --paper: #ffffff;
+  --ink: #000000;
+  --muted: #5c5c58;
+  --rule: #ddddd8;
+  --accent: #d4380d;
+  --glyph: #7a7a75;
+  --chrome: #ffffff;
+  --code-bg: #f4f4f1;
+  --selection: rgba(212, 56, 13, 0.14);
+
+  --hl-keyword: #d4380d;
+  --hl-string: #2b6a3e;
+  --hl-function: #000000;
+  --hl-type: #5a3fa0;
+  --hl-number: #a15c00;
+  --hl-comment: #7a7a75;
+  --hl-tag: #d4380d;
+
+  --marginal-glyph-side: right;
+  --marginal-glyph-style: raw;
+  --marginal-measure: 560px;
+  --marginal-margin: 160px;
+  --marginal-caret-shape: bar;
+  --marginal-caret-blink: on;
+  --marginal-ol-style: decimal;
+  --marginal-bullet: "•";
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0b0b0b;
+    --ink: #f4f4f2;
+    --muted: #a6a6a2;
+    --rule: #2e2e2c;
+    --accent: #ff6a3d;
+    --glyph: #8a8a86;
+    --chrome: #000000;
+    --code-bg: #181817;
+    --selection: rgba(255, 106, 61, 0.22);
+    --hl-keyword: #ff6a3d;
+    --hl-string: #8fd19e;
+    --hl-function: #f4f4f2;
+    --hl-type: #b9a3ff;
+    --hl-number: #ffb35c;
+    --hl-comment: #8a8a86;
+    --hl-tag: #ff6a3d;
+  }
+}
+
+#write {
+  font-family: "Instrument Sans", -apple-system, "Helvetica Neue", sans-serif;
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+p { margin-bottom: 18px; }
+
+h1, h2, h3, h4, h5, h6 { font-family: "Fraunces", Georgia, serif; line-height: 1.05; margin-top: 14px; margin-bottom: 14px; }
+h1 { font-size: 58px; font-weight: 900; letter-spacing: -0.03em; }
+h2 { font-size: 34px; font-weight: 700; letter-spacing: -0.02em; }
+h3 { font-size: 24px; font-weight: 700; }
+h4, h5, h6 { font-size: 18px; font-weight: 700; }
+
+strong { font-weight: 600; }
+em { font-style: italic; }
+del { text-decoration: line-through; color: var(--muted); }
+a { color: var(--accent); text-decoration: underline; }
+code { font-family: "IBM Plex Mono", Menlo, monospace; font-size: 14.5px; color: var(--accent); }
+sup { color: var(--accent); font-weight: 600; }
+
+blockquote {
+  font-family: "Fraunces", Georgia, serif;
+  font-size: 26px;
+  line-height: 1.2;
+  padding: 0;
+}
+
+pre {
+  font-family: "IBM Plex Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--code-bg);
+  padding: 12px 16px;
+  margin-bottom: 18px;
+}
+
+li { margin-bottom: 4px; }
+li.task-done { color: var(--muted); text-decoration: line-through; }
+
+hr { border-bottom: 2px solid var(--ink); margin-bottom: 18px; }
+
+table { font-size: 14px; margin-bottom: 18px; }
+th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; padding: 6px 10px; border-bottom: 2px solid var(--ink); }
+td { padding: 6px 10px; border-bottom: 1px solid var(--rule); }
+
+.hl-keyword, .hl-operator { color: var(--hl-keyword); }
+.hl-string, .hl-escape, .hl-string-special { color: var(--hl-string); }
+.hl-function, .hl-constructor { color: var(--hl-function); font-weight: 600; }
+.hl-type, .hl-attribute, .hl-module { color: var(--hl-type); }
+.hl-number, .hl-boolean, .hl-constant, .hl-property { color: var(--hl-number); }
+.hl-comment { color: var(--hl-comment); font-style: italic; }
+.hl-tag { color: var(--hl-tag); }
+.hl-punctuation, .hl-variable { color: var(--ink); }
+
+.glyph { font-family: "IBM Plex Mono", Menlo, monospace; color: var(--glyph); font-size: 11px; }
+.syntax { font-family: "IBM Plex Mono", Menlo, monospace; color: var(--glyph); }
+.caret { color: var(--accent); }
+.chip { font-family: "Instrument Sans", sans-serif; }
+.chrome { background: var(--chrome); color: var(--muted); }

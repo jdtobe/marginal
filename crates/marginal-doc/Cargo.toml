@@ -1,0 +1,15 @@
+[package]
+name = "marginal-doc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+regex = "1"
+pulldown-cmark = { version = "0.13", default-features = false }
+serde = { version = "1", features = ["derive"] }
+unicode-segmentation = "1"
+
+[dev-dependencies]
+proptest = "1"

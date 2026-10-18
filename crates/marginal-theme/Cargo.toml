@@ -1,0 +1,9 @@
+[package]
+name = "marginal-theme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lightningcss = "1.0.0-alpha.72"
