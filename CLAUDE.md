@@ -18,6 +18,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p marginal-doc --example dump -- file.md # print parsed blocks/segments/table cells
 ```
 
+- `MARGINAL_TRACE=1` prints any main-thread work over 8 ms (events, menu commands, frames,
+  layout, persistence); `MARGINAL_TRACE=all` prints every span. Disk flushes run on the
+  `marginal-session::Persister` thread, so they must never show up here.
 - `MARGINAL_DATA_DIR=/tmp/x` keeps a dev session (journal, session.json, Themes/) out of
   `~/Library/Application Support/Marginal`.
 - Visual checks render offscreen to PNG, never touching the real session:

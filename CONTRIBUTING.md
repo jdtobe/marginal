@@ -25,7 +25,8 @@ Run the last three before opening a pull request. There is no active CI: an exam
 Actions workflow lives in `.github/examples/ci.yml` and is deliberately outside
 `.github/workflows/`, so it never runs (macOS runners are billed).
 
-Set `MARGINAL_DATA_DIR=/some/tmp/dir` to keep a development session separate from your real
+Set `MARGINAL_TRACE=1` to print any main-thread work slower than 8 ms (`all` prints every
+span). Set `MARGINAL_DATA_DIR=/some/tmp/dir` to keep a development session separate from your real
 one in `~/Library/Application Support/Marginal`.
 
 ## Tests

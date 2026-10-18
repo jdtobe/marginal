@@ -9,16 +9,20 @@ use vello::{AaConfig, RenderParams, Renderer, Scene};
 
 use crate::editor::Editor;
 use crate::findbar::FindBar;
+use crate::gallery::panel::Panel;
 use crate::paint::color;
 use crate::renderer_options;
+use crate::themes::ThemeEntry;
 use crate::view::Fonts;
 use vello::kurbo::Affine;
 
-/// Renders the editor (and, if given, the find strip above it) to a PNG.
+/// Renders the editor (and, if given, the find strip above it and the theme gallery beside it)
+/// to a PNG.
 pub fn snapshot(
     editor: &mut Editor,
     fonts: &mut Fonts,
     mut findbar: Option<&mut FindBar>,
+    gallery: Option<(&mut Panel, &[ThemeEntry])>,
     out: &Path,
     scale: f64,
 ) -> anyhow::Result<()> {
@@ -27,7 +31,8 @@ pub fn snapshot(
     let handle = &context.devices[dev_id];
     let (device, queue) = (&handle.device, &handle.queue);
     let mut renderer = Renderer::new(device, renderer_options())?;
-    let (width, height) = ((editor.width as f64 * scale) as u32, (editor.height as f64 * scale) as u32);
+    let side = if gallery.is_some() { crate::gallery::panel::WIDTH } else { 0.0 };
+    let (width, height) = (((editor.width + side) as f64 * scale) as u32, (editor.height as f64 * scale) as u32);
     let mut scene = Scene::new();
     // Render with the caret in its visible phase.
     editor.activity = Instant::now();
@@ -43,6 +48,20 @@ pub fn snapshot(
     }
     let screen = Affine::scale(scale);
     editor.paint(&mut scene, fonts, screen * Affine::translate((0.0, inset as f64)), editor.activity);
+    if let Some((panel, installed)) = gallery {
+        let appearance = editor.appearance;
+        panel.paint(
+            &mut scene,
+            fonts,
+            appearance,
+            screen,
+            editor.width,
+            inset,
+            editor.height,
+            &panel.original.clone(),
+            installed,
+        );
+    }
     if let Some(bar) = findbar {
         bar.paint(&mut scene, fonts, &editor.theme, editor.appearance, screen, editor.width, true);
     }

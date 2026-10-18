@@ -1,0 +1,10 @@
+{
+  "fetched_at": 1792300000,
+  "entries": [
+    {"slug": "night", "title": "Night", "author": "typora.io", "tags": [], "thumbnail": null, "homepage": "https://github.com/typora/typora-default-themes", "download": "https://github.com/typora/typora-default-themes/archive/master.zip"},
+    {"slug": "github", "title": "Github", "author": "typora.io", "tags": [], "thumbnail": null, "homepage": "https://github.com/typora/typora-default-themes", "download": "https://github.com/typora/typora-default-themes/archive/master.zip"},
+    {"slug": "whitey", "title": "Whitey", "author": "typora.io", "tags": [], "thumbnail": null, "homepage": "https://github.com/typora/typora-default-themes", "download": "https://github.com/typora/typora-default-themes/archive/master.zip"},
+    {"slug": "dracula", "title": "Dracula", "author": "Teddy Zhou", "tags": ["dark"], "thumbnail": null, "homepage": "https://github.com/teddyzhou/typora-dracula", "download": "https://github.com/teddyzhou/typora-dracula/releases/latest"},
+    {"slug": "fuwari-light", "title": "Fuwari Light", "author": "Caphhh", "tags": ["light", "soft", "card", "cjk", "clean"], "thumbnail": null, "homepage": "https://github.com/Caph-dev/typora-fuwari-theme", "download": "https://github.com/Caph-dev/typora-fuwari-theme/archive/refs/heads/main.zip"}
+  ]
+}

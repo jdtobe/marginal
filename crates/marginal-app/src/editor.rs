@@ -19,6 +19,16 @@ use crate::paint::{color, draw_document, draw_layout};
 use crate::picker::{self, Picker, PickerInput};
 use crate::view::{DocView, Fonts, Reveal, layout_document, simple_layout};
 
+#[derive(Clone, Copy, Debug)]
+struct PaintColors {
+    caret: Color,
+    selection: Color,
+    glyph: Color,
+    accent: Color,
+    find_match: Color,
+    shape: CaretShape,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaretShape {
     Bar,
@@ -66,6 +76,8 @@ pub struct Editor {
     pub goto: Option<GoTo>,
     /// A jump waiting for layout to scroll its target into view.
     pending_scroll_to: Option<usize>,
+    /// Paint colors cached for an appearance; cleared by [`Editor::set_theme`].
+    colors: Option<(Appearance, PaintColors)>,
     /// Find matches to highlight, and which one is current.
     pub highlights: Vec<std::ops::Range<usize>>,
     pub highlight_current: Option<usize>,
@@ -105,6 +117,7 @@ impl Editor {
             grip_drag: None,
             menu: None,
             goto: None,
+            colors: None,
             pending_scroll_to: None,
             highlights: Vec::new(),
             highlight_current: None,
@@ -130,6 +143,8 @@ impl Editor {
 
     pub fn view(&mut self, fonts: &mut Fonts) -> &DocView {
         if self.view.is_none() {
+            let _t = crate::trace::span(|| "  layout".into());
+            fonts.load_theme_fonts(&self.theme);
             let reveal = Reveal { caret: Some(self.selection.caret), xray: self.xray, preedit: self.preedit.clone() };
             self.view = Some(layout_document(
                 &self.buffer.doc,
@@ -187,19 +202,43 @@ impl Editor {
     }
 
     /// Draws the document. `base` maps editor coordinates to device pixels (scale and zoom).
+    /// Replaces the theme (and drops colors cached from the old one).
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.colors = None;
+        self.invalidate();
+    }
+
+    /// Colors the painter needs every frame, resolved once per theme and appearance.
+    fn colors(&mut self) -> PaintColors {
+        if let Some((appearance, colors)) = self.colors
+            && appearance == self.appearance
+        {
+            return colors;
+        }
+        let caret = self.theme.style(self.appearance, "span", &["caret"], None).color;
+        let colors = PaintColors {
+            caret,
+            selection: self.selection_color(caret),
+            glyph: self.theme.style(self.appearance, "span", &["glyph"], None).color,
+            accent: self.theme.style(self.appearance, "a", &[], None).color,
+            find_match: self.var_color("--find-match").unwrap_or(Color { r: 210, g: 153, b: 34, a: 82 }),
+            shape: self.caret_shape(),
+        };
+        self.colors = Some((self.appearance, colors));
+        colors
+    }
+
     pub fn paint(&mut self, scene: &mut Scene, fonts: &mut Fonts, base: Affine, now: Instant) {
-        let caret_color = self.theme.style(self.appearance, "span", &["caret"], None).color;
-        let selection_color = self.selection_color(caret_color);
-        let shape = self.caret_shape();
+        let colors = self.colors();
+        let (caret_color, selection_color, shape) = (colors.caret, colors.selection, colors.shape);
         let (visible, _) = self.blink_phase(now);
         let scroll = self.scroll;
         let selection = self.selection;
         let has_preedit = self.preedit.is_some();
         let (pointer, caret_table, focus, dragging) =
             (self.pointer, self.caret_table(), self.table_focus, self.grip_drag.zip(self.pointer));
-        let glyph_color = self.theme.style(self.appearance, "span", &["glyph"], None).color;
-        let accent = self.theme.style(self.appearance, "a", &[], None).color;
-        let match_color = self.var_color("--find-match").unwrap_or(Color { r: 210, g: 153, b: 34, a: 82 });
+        let (glyph_color, accent, match_color) = (colors.glyph, colors.accent, colors.find_match);
         let (highlights, current) = (std::mem::take(&mut self.highlights), self.highlight_current);
         let height = self.height;
         let view = self.view(fonts);

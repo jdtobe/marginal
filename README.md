@@ -28,6 +28,10 @@ crash.
   *Manuscript*, *Studio* and *Editorial* are built in, and any `.css` dropped into
   `~/Library/Application Support/Marginal/Themes/` shows up in View ▸ Theme and reloads when
   saved.
+- **Theme gallery** (⇧⌘T): search the ~230 themes in the Typora theme gallery alongside the
+  built-ins, preview any of them on your own document, see how much of each Marginal can render
+  (a fit score), and install with Return. Typora themes get browser-style defaults underneath so
+  they look as their authors intended where Marginal supports the CSS.
 - **Find & replace** in a strip at the top of the window: plain text by default, with optional
   regex (`$1` groups in replacements), case and whole-word matching. Replace All is one undo step.
 - **Native menus** for everything, plus Go to Heading, Open Recent, text zoom and a light/dark
@@ -63,6 +67,7 @@ cargo run -p marginal-app -- --snapshot out.png [--light] [--theme Studio] [--xr
 | ⌘N, ⌘O | New, Open (File ▸ Open Recent lists recent files) |
 | ⌘F, ⌥⌘F, ⌘G / ⇧⌘G | Find, Find and Replace, next / previous match |
 | ⇧⌘O | Go to Heading |
+| ⇧⌘T | Browse themes (↑↓ preview, Return use or install, Esc cancel) |
 | ⌘= / ⌘−, ⇧⌘0 | Zoom in / out, actual size |
 | ⌥⌘X | Keep the Markdown source showing (latched x-ray) |
 | ⌥⌘R, ⌥⇧⌘C | Reveal in Finder, Copy Path |

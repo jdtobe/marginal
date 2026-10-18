@@ -50,6 +50,9 @@ not toolbars. These are the product decisions made so far; change them here when
 | Tables | Always a grid (x-ray shows the source). Aligned tables are re-padded as you type; compact ones stay compact |
 | Table keys | Tab / ⇧Tab walk cells (Tab in the last cell adds a row); Return goes to the cell below (adding a row at the end); ⇧Return writes `<br>`; ⌥⇧↑↓ move the row |
 | Table grips | Click selects a row or column (⌫ deletes it), drag reorders (a body row dragged to the top becomes the header), ⊕ on a border inserts there; right-click a column grip for alignment, insert and delete |
+| Theme gallery | View ▸ Theme ▸ Browse Themes… (⇧⌘T) opens a panel on the right: search, Light/Dark/Installed/Good-fit filters, rows with thumbnail, author, tags and a fit badge. Moving through the list restyles the open document; Return installs and keeps the theme, Esc restores the previous one. Source: the Typora theme gallery, fetched only when the panel opens and cached |
+| Typora compatibility | Grow the theme engine toward real document CSS in four phases (load more themes; selectors with context; box model; decorations and fonts), re-surveying the whole gallery after each. Acceptance set: GitHub, Night, Vue, Drake, OneDark, Purple, Lapis, Pie, Gothic, Newsprint |
+| Theme decorations | `::before`/`::after` decorations render (bars, quote marks, ornaments), but ones that only restate Markdown syntax (`#`, `H2`, `>`) are dropped, since the margin already shows syntax |
 | License | MIT OR Apache-2.0 |
 | Paid infrastructure | Nothing runs on billed services. The CI workflow is an inert example in `.github/examples/` |
 
@@ -58,11 +61,22 @@ not toolbars. These are the product decisions made so far; change them here when
 1. **M0 – Skeleton** (done): window, vello and parley drawing, Terminal theme.
 2. **M1 – Core editing loop** (done): lossless editing, margin glyphs, revealed inline marks,
    autoformat, undo tree, hot-exit journal, IME.
-3. **M2 – Structure** (in progress): tables, find & replace, menus and themes are done; images,
-   footnotes, structural selection, move and fold are next.
-4. **M3 – Workspace**: tabs, sidebar, multiple windows, palette, 3-way merge, link navigation.
+3. **M2 – Structure** (in progress). Done: tables, code highlighting and language picker, find &
+   replace, native menus, four themes and a user themes folder. In progress: menu
+   responsiveness, an in-app Typora theme gallery with live preview and fit scores. Next:
+   images (configurable save location), footnotes and sidenotes, structural selection
+   (⌥↑/↓), moving blocks and sections (⌥⇧↑/↓, dragging a heading glyph), folding, proximity
+   fades for every block control.
+4. **M3 – Workspace**: folder workspaces with a sidebar, relative link navigation, tabs and
+   multiple windows restored by hot exit, the ⇧⌘P command palette over commands, files and
+   headings, live 3-way merge of external edits, journal compaction.
 5. **M4 – Rich blocks**: math, Mermaid.
-6. **M5 – Polish**: spellcheck, HTML and PDF export, a Typora theme browser.
+6. **M5 – Polish**: spellcheck (both backends), HTML and PDF export, theme engine gaps
+   (`@font-face`, small-caps, background images) and in-app theme diagnostics.
+
+Cross-cutting work not yet started: VoiceOver support via accesskit, a signed `.app` bundle with
+Finder open-file handling, hand-testing IME, and verification debt (fuzzing, CommonMark-spec and
+real-README round trips, per-theme snapshot comparisons).
 
 ## Open questions
 

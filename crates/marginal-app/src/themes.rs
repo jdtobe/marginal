@@ -70,8 +70,7 @@ impl Themes {
         let theme = match &entry.path {
             None => Theme::built_in(name).ok_or(format!("no theme named {name}"))?,
             Some(path) => {
-                let css = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                let theme = Theme::parse(&css).map_err(|e| format!("{}: {e}", path.display()))?;
+                let theme = Theme::load_file(path)?;
                 for d in &theme.diagnostics {
                     eprintln!("{}:{}: {}", path.display(), d.line, d.message);
                 }
@@ -81,6 +80,15 @@ impl Themes {
         self.selected = entry.name;
         self.loaded_at = entry.path.as_deref().and_then(modified);
         Ok(theme)
+    }
+
+    /// Loads a theme without selecting it (for previews).
+    pub fn peek(&self, name: &str) -> Result<Theme, String> {
+        let entry = self.entries.iter().find(|e| e.name == name).ok_or(format!("no theme named {name}"))?;
+        match &entry.path {
+            None => Theme::built_in(name).ok_or(format!("no theme named {name}")),
+            Some(path) => Theme::load_file(path),
+        }
     }
 
     /// The selected theme again, if it is a user theme whose file changed since it was loaded.

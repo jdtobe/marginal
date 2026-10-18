@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use marginal_doc::{Document, Transaction};
+
+mod persist;
 use marginal_history::{EditKind, History, Selection};
+pub use persist::Persister;
 use serde::{Deserialize, Serialize};
 
 pub fn now_ms() -> u64 {
@@ -119,8 +122,14 @@ impl Store {
     }
 
     pub fn save_session(&self, session: &SessionFile) -> io::Result<()> {
+        let (path, json) = self.session_write(session)?;
+        write_atomic(&path, &json)
+    }
+
+    /// Where `session.json` goes and its bytes, for writing on a [`Persister`].
+    pub fn session_write(&self, session: &SessionFile) -> io::Result<(PathBuf, Vec<u8>)> {
         let json = serde_json::to_vec_pretty(session).map_err(io::Error::other)?;
-        write_atomic(&self.root.join("session.json"), &json)
+        Ok((self.root.join("session.json"), json))
     }
 
     fn buffer_dir(&self, id: &str) -> PathBuf {
@@ -310,6 +319,17 @@ impl Buffer {
     }
 
     /// Flushes the journal to stable storage.
+    /// A handle to flush on a [`Persister`] if the journal has unflushed entries. The entries
+    /// are already written to the file; only the flush to stable storage is deferred.
+    pub fn journal_to_sync(&mut self) -> io::Result<Option<File>> {
+        if !self.unsynced {
+            return Ok(None);
+        }
+        let handle = self.journal.try_clone()?;
+        self.unsynced = false;
+        Ok(Some(handle))
+    }
+
     pub fn sync(&mut self) -> io::Result<()> {
         if self.unsynced {
             self.journal.sync_data()?;

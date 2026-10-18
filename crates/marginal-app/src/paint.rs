@@ -65,6 +65,59 @@ fn brush_of(style: &parley::Style<Brush>) -> PColor {
     color(style.brush.color())
 }
 
+fn draw_ornament(scene: &mut Scene, origin: Affine, o: &crate::view::Ornament) {
+    use crate::view::Ornament;
+    match o {
+        Ornament::Text { layout, x, y, background, radius, padding } => {
+            if let Some(bg) = background {
+                let rect = Rect::new(
+                    (*x - padding[3]) as f64,
+                    (*y - padding[0]) as f64,
+                    (*x + layout.width() + padding[1]) as f64,
+                    (*y + layout.height() + padding[2]) as f64,
+                );
+                scene.fill(Fill::NonZero, origin, color(*bg), None, &RoundedRect::from_rect(rect, *radius as f64));
+            }
+            draw_layout(scene, layout, origin * Affine::translate((*x as f64, *y as f64)));
+        }
+        Ornament::Shape { rect, color: fill, border, radius } => {
+            let r = RoundedRect::new(rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64, *radius as f64);
+            if let Some(c) = fill {
+                scene.fill(Fill::NonZero, origin, color(*c), None, &r);
+            }
+            if let Some(b) = border {
+                let band = Rect::new(rect.0 as f64, (rect.3 - b.width) as f64, rect.2 as f64, rect.3 as f64);
+                scene.fill(Fill::NonZero, origin, color(b.color), None, &band);
+            }
+        }
+    }
+}
+
+/// A block's borders: a rounded outline when the corners are rounded and the sides match,
+/// otherwise each side as a band along the box's edge.
+fn draw_borders(scene: &mut Scene, origin: Affine, s: &marginal_theme::Style, outer: Rect) {
+    let sides = [s.border_top, s.border_right, s.border_bottom, s.border_left];
+    if s.border_radius > 0.0
+        && let [Some(first), ..] = sides
+        && sides.iter().all(|b| *b == Some(first))
+    {
+        let w = first.width as f64;
+        let rect = RoundedRect::from_rect(outer.inset(-w / 2.0), s.border_radius as f64);
+        scene.stroke(&Stroke::new(w), origin, color(first.color), None, &rect);
+        return;
+    }
+    let (x0, y0, x1, y1) = (outer.x0, outer.y0, outer.x1, outer.y1);
+    let bands = [
+        sides[0].map(|b| (Rect::new(x0, y0, x1, y0 + b.width as f64), b.color)),
+        sides[1].map(|b| (Rect::new(x1 - b.width as f64, y0, x1, y1), b.color)),
+        sides[2].map(|b| (Rect::new(x0, y1 - b.width as f64, x1, y1), b.color)),
+        sides[3].map(|b| (Rect::new(x0, y0, x0 + b.width as f64, y1), b.color)),
+    ];
+    for (rect, c) in bands.into_iter().flatten() {
+        scene.fill(Fill::NonZero, origin, color(c), None, &rect);
+    }
+}
+
 pub fn draw_document(scene: &mut Scene, view: &DocView, origin: Affine) {
     for b in &view.blocks {
         draw_block(scene, b, origin);
@@ -73,6 +126,20 @@ pub fn draw_document(scene: &mut Scene, view: &DocView, origin: Affine) {
 
 fn draw_block(scene: &mut Scene, b: &BlockView, origin: Affine) {
     let s = &b.style;
+    // The box including a bottom border, which sits just below `bottom`.
+    let below = if b.rule { 0.0 } else { s.border_bottom.map_or(0.0, |bd| bd.width) };
+    let outer = Rect::new(b.box_x as f64, b.top as f64, (b.box_x + b.box_width) as f64, (b.bottom + below) as f64);
+    if let Some(shadow) = s.box_shadow.filter(|_| b.cell.is_none()) {
+        let r = outer.inflate(shadow.spread as f64, shadow.spread as f64)
+            + vello::kurbo::Vec2::new(shadow.dx as f64, shadow.dy as f64);
+        scene.draw_blurred_rounded_rect(
+            origin,
+            r,
+            color(shadow.color),
+            s.border_radius as f64,
+            (shadow.blur / 2.0).max(0.5) as f64,
+        );
+    }
     if let Some(bg) = s.background {
         let rect = RoundedRect::new(
             b.box_x as f64,
@@ -97,6 +164,9 @@ fn draw_block(scene: &mut Scene, b: &BlockView, origin: Affine) {
         let rect = Rect::new(x as f64, top as f64, (x + width) as f64, b.bottom as f64);
         scene.fill(Fill::NonZero, origin, color(c), None, &rect);
     }
+    for o in &b.ornaments {
+        draw_ornament(scene, origin, o);
+    }
     if b.rule {
         let c = s.border_bottom.map_or(s.color.with_alpha(0.3), |bd| bd.color);
         let y = (b.top + b.bottom) as f64 / 2.0;
@@ -105,14 +175,8 @@ fn draw_block(scene: &mut Scene, b: &BlockView, origin: Affine) {
     } else {
         draw_layout(scene, &b.layout, origin * Affine::translate((b.text_x as f64, b.text_y as f64)));
     }
-    if let Some(border) = s.border_bottom.filter(|_| !b.rule) {
-        let rect = Rect::new(
-            b.box_x as f64,
-            b.bottom as f64,
-            (b.box_x + b.box_width) as f64,
-            (b.bottom + border.width) as f64,
-        );
-        scene.fill(Fill::NonZero, origin, color(border.color), None, &rect);
+    if b.cell.is_none() && !b.rule {
+        draw_borders(scene, origin, s, outer);
     }
     if let Some(g) = &b.glyph
         && let Some(bg) = g.pill

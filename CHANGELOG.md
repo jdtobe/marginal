@@ -19,9 +19,25 @@ All notable changes to Marginal are listed here. The format follows
 - Native menu bar; Open Recent, Reveal in Finder, Copy Path; text zoom; light/dark override;
   latched x-ray; Go to Heading.
 - Find & replace with optional regex, case and whole-word matching.
+- Theme gallery (⇧⌘T): search built-in, installed and Typora-gallery themes, live preview on
+  the open document, fit scores, one-step install and removal.
+- Theme engine: browser-style base styles, Typora class aliases, table descendant selectors,
+  padding longhands, `text-align`, and a fit score per stylesheet.
+- Typora theme compatibility: real CSS selectors (descendant, child, `:first-child`,
+  `:nth-child`, `:not()`), variables on any element, dark-mode rules, borders on all sides, box
+  shadows, page width, side margins, `text-indent`, `list-style-type`, the `font` shorthand,
+  `hsl()`/`oklch()`/named colors, `@import`, `::before`/`::after` decorations (syntax-restating
+  ones are dropped), heading counters, and fonts shipped with a theme (TTF, OTF, WOFF, WOFF2).
+  Across the 229-theme Typora gallery: 119 good fits (was 11), median fit 82% (was 56%).
+- Gallery downloads fetch only a theme's stylesheets and fonts from GitHub repositories, fall
+  back to the homepage link, and skip broken CSS rules instead of rejecting a theme.
+- `MARGINAL_TRACE` timing for main-thread work.
 - Numbered lists drawn as muted `1.` (themes can choose circled or padded numbers).
 
 ### Fixed
 
 - ↑ no longer gets stuck at the top of a block.
 - ← / → reset the column that ↑ / ↓ remember.
+- Scrolling the theme gallery with the mouse no longer jumps back to the selected theme.
+- Journal flushes and session saves no longer run on the main thread, and the menu bar is only
+  updated when its state changes.

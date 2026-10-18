@@ -1,5 +1,6 @@
 mod editor;
 mod findbar;
+mod gallery;
 mod goto;
 mod handles;
 mod menu;
@@ -8,6 +9,7 @@ mod paint;
 mod picker;
 mod snapshot;
 mod themes;
+mod trace;
 mod view;
 
 use std::num::NonZeroUsize;
@@ -16,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use marginal_doc::{InlineFormat, Selection};
-use marginal_session::{BufferMeta, SessionFile, Store};
+use marginal_session::{BufferMeta, Persister, SessionFile, Store};
 use marginal_theme::{Appearance, Theme};
 use vello::kurbo::{Affine, Rect};
 use vello::util::{RenderContext, RenderSurface};
@@ -49,6 +51,7 @@ const ZOOM_STEPS: &[f32] = &[0.67, 0.75, 0.85, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2
 #[derive(Debug)]
 enum UserEvent {
     Menu(muda::MenuEvent),
+    Gallery(gallery::GalleryEvent),
 }
 
 struct RenderState {
@@ -80,6 +83,14 @@ struct App {
     window_size: (f32, f32),
     /// The appearance the system (or the window) reports, used when not overridden.
     system_appearance: Appearance,
+    /// Flushes journals and writes session.json off the main thread.
+    persister: Persister,
+    /// The theme gallery panel, when open, and its worker (started on first use).
+    gallery: Option<gallery::panel::Panel>,
+    gallery_worker: Option<gallery::Worker>,
+    /// When to download the selected gallery theme (debounced while arrowing through).
+    gallery_due: Option<Instant>,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
 }
 
 pub(crate) fn renderer_options() -> RendererOptions {
@@ -112,6 +123,11 @@ impl App {
         self.findbar.as_ref().map_or(0.0, |b| b.height(self.window_size.0))
     }
 
+    /// The gallery panel's width on the right, when open.
+    fn inset_right(&self) -> f32 {
+        if self.gallery.is_some() { gallery::panel::WIDTH.min(self.window_size.0 * 0.5) } else { 0.0 }
+    }
+
     /// Window coordinates to the editor's (zoomed, below the strip).
     fn to_editor(&self, (x, y): (f32, f32)) -> (f32, f32) {
         (x / self.zoom(), (y - self.inset()) / self.zoom())
@@ -119,7 +135,7 @@ impl App {
 
     fn layout_editor(&mut self) {
         let (w, h) = self.window_size;
-        self.editor.width = w / self.zoom();
+        self.editor.width = (w - self.inset_right()) / self.zoom();
         self.editor.height = ((h - self.inset()) / self.zoom()).max(1.0);
         self.editor.invalidate();
     }
@@ -127,6 +143,7 @@ impl App {
     // ---- session -------------------------------------------------------------------------------
 
     fn persist_session(&mut self) {
+        let _t = trace::span(|| "persist session".into());
         let meta = self.editor.buffer.meta(self.editor.selection, self.editor.scroll);
         match self.session.buffers.iter_mut().find(|m| m.id == meta.id) {
             Some(existing) => *existing = meta.clone(),
@@ -137,15 +154,16 @@ impl App {
         if let Some(bar) = &self.findbar {
             self.session.settings.find = bar.options;
         }
-        if let Err(e) = self.store.save_session(&self.session) {
-            eprintln!("could not save session: {e}");
+        match self.store.session_write(&self.session) {
+            Ok((path, bytes)) => self.persister.write(path, bytes),
+            Err(e) => eprintln!("could not save session: {e}"),
         }
         self.editor.session_dirty = false;
         self.session_written = Instant::now();
     }
 
     fn sync_menus(&mut self) {
-        if let Some(bar) = &self.menubar {
+        if let Some(bar) = &mut self.menubar {
             let s = &self.session.settings;
             bar.sync(self.themes.selected(), s.appearance.as_deref(), s.xray, self.editor.buffer.path.is_some());
         }
@@ -160,8 +178,24 @@ impl App {
 
     // ---- documents ---------------------------------------------------------------------------
 
+    /// Hands the journal's pending flush to the persistence thread.
+    fn sync_journal(&mut self) {
+        let _t = trace::span(|| "journal sync".into());
+        match self.editor.buffer.journal_to_sync() {
+            Ok(Some(file)) => self.persister.sync(file),
+            Ok(None) => {}
+            // No second handle: flush here rather than not at all.
+            Err(_) => {
+                if let Err(e) = self.editor.buffer.sync() {
+                    eprintln!("journal sync failed: {e}");
+                }
+            }
+        }
+    }
+
     /// Shows another buffer in the window, keeping the view settings.
     fn switch_to(&mut self, buffer: marginal_session::Buffer, meta: BufferMeta) {
+        self.sync_journal();
         self.persist_session();
         let mut editor = Editor::new(buffer, meta.selection, self.editor.theme.clone(), self.editor.appearance);
         editor.scroll = meta.scroll;
@@ -226,8 +260,7 @@ impl App {
     fn set_theme(&mut self, name: &str) {
         match self.themes.load(name) {
             Ok(theme) => {
-                self.editor.theme = theme;
-                self.editor.invalidate();
+                self.editor.set_theme(theme);
                 self.session.settings.theme = Some(name.to_owned());
                 self.editor.session_dirty = true;
             }
@@ -246,8 +279,7 @@ impl App {
         if let Some(result) = self.themes.reload_if_changed() {
             match result {
                 Ok(theme) => {
-                    self.editor.theme = theme;
-                    self.editor.invalidate();
+                    self.editor.set_theme(theme);
                 }
                 Err(e) => eprintln!("theme: {e}"),
             }
@@ -388,6 +420,201 @@ impl App {
             }
             Action::Close => self.close_find(),
         }
+    }
+
+    // ---- theme gallery -------------------------------------------------------------------------
+
+    fn open_gallery(&mut self) {
+        if self.gallery.is_some() {
+            return;
+        }
+        let worker = self.gallery_worker.get_or_insert_with(|| {
+            let proxy = self.proxy.clone();
+            let paths = gallery::Paths { root: self.store.root().join("Gallery") };
+            gallery::Worker::start(paths, move |e| {
+                let _ = proxy.send_event(UserEvent::Gallery(e));
+            })
+        });
+        worker.load_index(false);
+        let mut panel = gallery::panel::Panel::new(self.themes.selected().to_owned(), self.editor.theme.clone());
+        // Fit scores for built-in and installed themes.
+        for entry in &self.themes.entries {
+            if let Ok(theme) = self.themes.peek(&entry.name) {
+                panel.fits.insert(entry.name.clone(), theme.fit.clone());
+            }
+        }
+        let current = panel.original.clone();
+        panel.selected = panel.rows(&self.themes.entries).iter().position(|r| r.name == current).unwrap_or(0);
+        self.gallery = Some(panel);
+        self.layout_editor();
+        self.redraw();
+    }
+
+    /// Closes the gallery; `restore` puts back the theme in use before it opened.
+    fn close_gallery(&mut self, restore: bool) {
+        let Some(panel) = self.gallery.take() else { return };
+        self.gallery_due = None;
+        if restore && let Ok(theme) = self.themes.peek(&panel.original) {
+            self.editor.set_theme(theme);
+        }
+        self.layout_editor();
+        self.redraw();
+    }
+
+    fn gallery_event(&mut self, event: gallery::GalleryEvent) {
+        use gallery::GalleryEvent;
+        use gallery::panel::{Download, Status};
+        let Some(panel) = &mut self.gallery else { return };
+        match event {
+            GalleryEvent::Index { entries, fetched_at, stale } => {
+                panel.entries = entries;
+                panel.status = Status::Ready { fetched_at, stale };
+            }
+            GalleryEvent::IndexFailed(e) => panel.status = Status::Failed(e),
+            GalleryEvent::Thumbnail { slug, image } => {
+                panel.thumbs.insert(slug, image);
+            }
+            GalleryEvent::Downloaded { slug, result } => {
+                let title = panel.entries.iter().find(|e| e.slug == slug).map(|e| e.title.clone()).unwrap_or_default();
+                let state = match result {
+                    Ok(variants) => {
+                        let mut ready = Vec::new();
+                        for v in gallery::download::matching(&variants, &title) {
+                            let theme = marginal_theme::Theme::load_file(&v.css).ok();
+                            if ready.is_empty()
+                                && let Some(t) = &theme
+                            {
+                                let bg = t.style(Appearance::Light, "body", &[], None).background;
+                                panel.dark.insert(slug.clone(), bg.is_some_and(|c| luminance(c) < 0.4));
+                            }
+                            ready.push((v, theme.map(|t| t.fit).unwrap_or_default()));
+                        }
+                        Download::Ready(ready)
+                    }
+                    Err(e) => Download::Failed(e),
+                };
+                panel.downloads.insert(slug.clone(), state);
+                // Preview it if it is still the selected row.
+                if let Some(row) = panel.rows(&self.themes.entries).get(panel.selected).cloned()
+                    && matches!(&row.source, gallery::panel::Source::Gallery(i) if panel.entries[*i].slug == slug)
+                {
+                    self.preview(&row);
+                }
+            }
+        }
+    }
+
+    /// Requests the download of the selected gallery row, if it isn't downloaded yet.
+    fn download_selected(&mut self) {
+        let (Some(panel), Some(worker)) = (&mut self.gallery, &self.gallery_worker) else { return };
+        let Some(row) = panel.rows(&self.themes.entries).get(panel.selected).cloned() else { return };
+        if let gallery::panel::Source::Gallery(i) = row.source {
+            let e = &panel.entries[i];
+            if !panel.downloads.contains_key(&e.slug) && (e.download.is_some() || e.homepage.is_some()) {
+                panel.downloads.insert(e.slug.clone(), gallery::panel::Download::Pending);
+                worker.download(&e.slug, e.download.as_deref(), e.homepage.as_deref());
+            }
+        }
+    }
+
+    /// Shows a row's theme on the document without choosing it.
+    fn preview(&mut self, row: &gallery::panel::Row) {
+        use gallery::panel::{Download, Source};
+        let theme = match &row.source {
+            Source::BuiltIn | Source::Installed(_) => self.themes.peek(&row.name).ok(),
+            Source::Gallery(i) => {
+                let Some(panel) = &self.gallery else { return };
+                match panel.downloads.get(&panel.entries[*i].slug) {
+                    Some(Download::Ready(v)) => {
+                        v.first().and_then(|(var, _)| marginal_theme::Theme::load_file(&var.css).ok())
+                    }
+                    None => {
+                        self.gallery_due = Some(Instant::now() + Duration::from_millis(250));
+                        None
+                    }
+                    _ => None,
+                }
+            }
+        };
+        if let Some(theme) = theme {
+            self.editor.set_theme(theme);
+        }
+    }
+
+    fn panel_action(&mut self, action: gallery::panel::PanelAction) {
+        use gallery::panel::{Download, PanelAction, Source};
+        match action {
+            PanelAction::Preview(row) => self.preview(&row),
+            PanelAction::Close => self.close_gallery(true),
+            PanelAction::Commit(row) => match &row.source {
+                Source::BuiltIn | Source::Installed(_) => {
+                    self.set_theme(&row.name);
+                    self.close_gallery(false);
+                }
+                Source::Gallery(i) => {
+                    let Some(panel) = &self.gallery else { return };
+                    let Some(Download::Ready(variants)) = panel.downloads.get(&panel.entries[*i].slug) else {
+                        // Not downloaded yet: start now; Install works once it arrives.
+                        self.gallery_due = None;
+                        self.download_selected();
+                        return;
+                    };
+                    let mut first = None;
+                    for (variant, _) in variants {
+                        match gallery::download::install(variant, &self.themes.folder) {
+                            Ok(name) => {
+                                first.get_or_insert(name);
+                            }
+                            Err(e) => eprintln!("could not install {}: {e}", variant.name),
+                        }
+                    }
+                    self.refresh_themes();
+                    if let Some(name) = first {
+                        self.set_theme(&name);
+                    }
+                    self.close_gallery(false);
+                }
+            },
+            PanelAction::OpenUrl(url) => {
+                if url.starts_with("https://") || url.starts_with("http://") {
+                    let _ = std::process::Command::new("open").arg(url).spawn();
+                }
+            }
+            PanelAction::Reveal(path) => {
+                let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+            }
+            PanelAction::Remove(path) => {
+                let removed = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                if let Err(e) = gallery::download::uninstall(&path) {
+                    eprintln!("could not remove {}: {e}", path.display());
+                }
+                self.refresh_themes();
+                if removed.as_deref() == Some(self.themes.selected())
+                    || self.themes.peek(self.themes.selected()).is_err()
+                {
+                    self.set_theme(marginal_theme::BUILT_IN[0].0);
+                }
+                if let Some(panel) = &mut self.gallery
+                    && let Some(name) = removed
+                {
+                    panel.fits.remove(&name);
+                }
+            }
+            PanelAction::Retry(i) => {
+                if let Some(panel) = &mut self.gallery {
+                    let slug = panel.entries[i].slug.clone();
+                    panel.downloads.remove(&slug);
+                }
+                self.download_selected();
+            }
+            PanelAction::Refresh => {
+                if let (Some(panel), Some(worker)) = (&mut self.gallery, &self.gallery_worker) {
+                    panel.status = gallery::panel::Status::Loading;
+                    worker.load_index(true);
+                }
+            }
+        }
+        self.redraw();
     }
 
     // ---- commands ----------------------------------------------------------------------------
@@ -576,6 +803,7 @@ impl App {
                 return self.redraw();
             }
             Command::GoToHeading => ed.open_goto(),
+            Command::BrowseThemes => return self.open_gallery(),
         }
         if reveal {
             self.editor.reveal_caret(fonts);
@@ -602,6 +830,14 @@ impl App {
         {
             if let Some(action) = action {
                 self.find_action(action);
+            }
+            return true;
+        }
+        if let Some(panel) = &mut self.gallery
+            && let Some(action) = panel.key(&event.logical_key, event.text.as_deref(), cmd, &self.themes.entries)
+        {
+            if let Some(action) = action {
+                self.panel_action(action);
             }
             return true;
         }
@@ -752,6 +988,7 @@ impl App {
     }
 
     fn render(&mut self) {
+        let _t = trace::span(|| "frame".into());
         let Some(window) = self.window() else { return };
         let scale = window.scale_factor();
         let now = Instant::now();
@@ -761,11 +998,35 @@ impl App {
         let (w, h) = (self.window_size.0 as f64, self.window_size.1 as f64);
         self.scene.reset();
         let screen = Affine::scale(scale);
-        self.scene.push_clip_layer(vello::peniko::Fill::NonZero, screen, &Rect::new(0.0, inset, w, h));
+        let right = self.inset_right() as f64;
+        self.scene.push_clip_layer(vello::peniko::Fill::NonZero, screen, &Rect::new(0.0, inset, w - right, h));
         let base = screen * Affine::translate((0.0, inset)) * Affine::scale(zoom);
-        self.editor.paint(&mut self.scene, &mut self.fonts, base, now);
+        {
+            let _t = trace::span(|| "  paint".into());
+            self.editor.paint(&mut self.scene, &mut self.fonts, base, now);
+        }
         self.scene.pop_layer();
         let blink_on = self.editor.blink_phase(now).0;
+        if let Some(panel) = &mut self.gallery {
+            let current = self.themes.selected().to_owned();
+            panel.paint(
+                &mut self.scene,
+                &mut self.fonts,
+                self.editor.appearance,
+                screen,
+                (w - right) as f32,
+                inset as f32,
+                h as f32,
+                &current,
+                &self.themes.entries,
+            );
+            if let Some(worker) = &self.gallery_worker {
+                for (slug, url) in std::mem::take(&mut panel.wanted_thumbs) {
+                    panel.thumbs.insert(slug.clone(), None);
+                    worker.thumbnail(&slug, &url);
+                }
+            }
+        }
         if let Some(bar) = &mut self.findbar {
             bar.paint(
                 &mut self.scene,
@@ -799,6 +1060,7 @@ impl App {
                 },
             )
             .expect("render");
+        let _gpu = trace::span(|| "  acquire + present".into());
         let surface_texture = match surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             _ => {
@@ -830,6 +1092,15 @@ impl App {
             self.title = title;
         }
     }
+}
+
+/// Relative luminance (0 black – 1 white), for telling dark themes from light ones.
+fn luminance(c: marginal_theme::Color) -> f32 {
+    let ch = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
 }
 
 fn appearance_of(theme: Option<WinitTheme>) -> Appearance {
@@ -878,13 +1149,22 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Menu(e) = event;
-        if let Some(command) = self.menubar.as_ref().and_then(|b| b.command(e.id())) {
-            self.command(command, event_loop);
+        let _t = trace::span(|| format!("menu {event:?}"));
+        match event {
+            UserEvent::Menu(e) => {
+                if let Some(command) = self.menubar.as_ref().and_then(|b| b.command(e.id())) {
+                    self.command(command, event_loop);
+                }
+            }
+            UserEvent::Gallery(e) => {
+                self.gallery_event(e);
+                self.redraw();
+            }
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let _t = trace::span(|| format!("{event:?}").chars().take(60).collect());
         let Some(state) = &mut self.state else { return };
         let scale = state.window.scale_factor();
         let window = state.window.clone();
@@ -948,6 +1228,12 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(action) = self.findbar.as_mut().and_then(|b| b.click(x, y)) {
                             self.find_action(action);
                         }
+                    } else if self.gallery.is_some() && self.cursor.0 >= self.window_size.0 - self.inset_right() {
+                        let (x, y) = self.cursor;
+                        let installed = self.themes.entries.clone();
+                        if let Some(action) = self.gallery.as_mut().and_then(|p| p.click(x, y, &installed)) {
+                            self.panel_action(action);
+                        }
                     } else {
                         if let Some(bar) = &mut self.findbar {
                             bar.focus = None;
@@ -974,7 +1260,13 @@ impl ApplicationHandler<UserEvent> for App {
                     MouseScrollDelta::PixelDelta(p) => -(p.to_logical::<f32>(scale).y),
                 };
                 let zoom = self.zoom();
-                self.editor.scroll_by(&mut self.fonts, dy / zoom);
+                if let Some(panel) =
+                    self.gallery.as_mut().filter(|_| self.cursor.0 >= self.window_size.0 - gallery::panel::WIDTH)
+                {
+                    panel.scroll_by(dy);
+                } else {
+                    self.editor.scroll_by(&mut self.fonts, dy / zoom);
+                }
                 window.request_redraw();
             }
             WindowEvent::Ime(ime) => {
@@ -1006,7 +1298,6 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if self.key(&event, event_loop) {
-                    self.sync_menus();
                     window.request_redraw();
                 }
             }
@@ -1017,10 +1308,8 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        if now.duration_since(self.editor.activity) >= SYNC_AFTER
-            && let Err(e) = self.editor.buffer.sync()
-        {
-            eprintln!("journal sync failed: {e}");
+        if now.duration_since(self.editor.activity) >= SYNC_AFTER {
+            self.sync_journal();
         }
         if self.editor.session_dirty && now.duration_since(self.session_written) >= SESSION_EVERY {
             self.persist_session();
@@ -1032,7 +1321,12 @@ impl ApplicationHandler<UserEvent> for App {
         if visible != self.drawn_blink {
             self.redraw();
         }
+        if self.gallery_due.is_some_and(|t| t <= now) {
+            self.gallery_due = None;
+            self.download_selected();
+        }
         let wake = [
+            self.gallery_due,
             next_blink,
             self.editor.session_dirty.then(|| self.session_written + SESSION_EVERY),
             (idle < SYNC_AFTER).then(|| self.editor.activity + SYNC_AFTER),
@@ -1047,8 +1341,15 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Quitting waits for everything: queued writes first, then a final synchronous save.
         self.persist_session();
-        let _ = self.editor.buffer.sync();
+        self.persister.flush();
+        if let Err(e) = self.store.save_session(&self.session) {
+            eprintln!("could not save session: {e}");
+        }
+        if let Err(e) = self.editor.buffer.sync() {
+            eprintln!("journal sync failed: {e}");
+        }
     }
 }
 
@@ -1108,6 +1409,9 @@ fn main() -> anyhow::Result<()> {
     let mut find_query: Option<String> = None;
     let mut replace_with: Option<String> = None;
     let mut regex = false;
+    let mut theme_css: Option<PathBuf> = None;
+    let mut gallery_query: Option<String> = None;
+    let mut gallery_index: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--snapshot" => snapshot_out = args.next().map(PathBuf::from),
@@ -1121,6 +1425,9 @@ fn main() -> anyhow::Result<()> {
             "--find" => find_query = args.next(),
             "--replace" => replace_with = args.next(),
             "--regex" => regex = true,
+            "--theme-css" => theme_css = args.next().map(PathBuf::from),
+            "--gallery" => gallery_query = args.next(),
+            "--gallery-index" => gallery_index = args.next().map(PathBuf::from),
             "--pointer" => {
                 pointer = args.next().and_then(|p| {
                     let (x, y) = p.split_once(',')?;
@@ -1141,7 +1448,19 @@ fn main() -> anyhow::Result<()> {
             None => SAMPLE.to_owned(),
         };
         let buffer = store.create_buffer(None, &text)?;
-        let theme = theme_name.as_deref().and_then(Theme::built_in).unwrap_or_else(Theme::terminal);
+        let theme = match &theme_css {
+            Some(css) => {
+                let theme = Theme::load_file(css).map_err(anyhow::Error::msg)?;
+                eprintln!(
+                    "fit: {} ({:.0}%), missing: {}",
+                    theme.fit.label(),
+                    theme.fit.ratio() * 100.0,
+                    theme.fit.summary(5)
+                );
+                theme
+            }
+            None => theme_name.as_deref().and_then(Theme::built_in).unwrap_or_else(Theme::terminal),
+        };
         let mut editor = Editor::new(buffer, Selection::default(), theme, appearance);
         editor.xray = xray;
         if let Some(c) = caret {
@@ -1174,7 +1493,25 @@ fn main() -> anyhow::Result<()> {
             }
             bar
         });
-        let result = snapshot::snapshot(&mut editor, &mut fonts, bar.as_mut(), &out, 2.0);
+        let mut panel = gallery_query.map(|q| {
+            let mut p = gallery::panel::Panel::new("Terminal".into(), editor.theme.clone());
+            if let Some(index) = gallery_index.as_deref().and_then(gallery::index::Cached::load) {
+                p.entries = index.entries;
+                p.status = gallery::panel::Status::Ready { fetched_at: index.fetched_at, stale: false };
+            }
+            p.query = q;
+            p.selected = 0;
+            p
+        });
+        let installed: Vec<themes::ThemeEntry> = Vec::new();
+        let result = snapshot::snapshot(
+            &mut editor,
+            &mut fonts,
+            bar.as_mut(),
+            panel.as_mut().map(|p| (p, installed.as_slice())),
+            &out,
+            2.0,
+        );
         drop(editor);
         let _ = std::fs::remove_dir_all(&tmp);
         return result;
@@ -1229,6 +1566,11 @@ fn main() -> anyhow::Result<()> {
         findbar: None,
         window_size: (1000.0, 800.0),
         system_appearance: appearance,
+        persister: Persister::start(),
+        gallery: None,
+        gallery_worker: None,
+        gallery_due: None,
+        proxy: event_loop.create_proxy(),
     };
     app.persist_session();
     event_loop.run_app(&mut app)?;

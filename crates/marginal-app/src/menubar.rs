@@ -53,6 +53,7 @@ pub enum Command {
     ZoomOut,
     ActualSize,
     GoToHeading,
+    BrowseThemes,
 }
 
 /// The menu bar plus the items whose state changes (checks, enabled, lists).
@@ -65,6 +66,8 @@ pub struct MenuBar {
     appearance: Vec<(Option<&'static str>, CheckMenuItem)>,
     xray: CheckMenuItem,
     needs_file: Vec<MenuItem>,
+    /// What [`MenuBar::sync`] last applied, so unchanged state never touches NSMenu.
+    synced: Option<(String, Option<String>, bool, bool)>,
 }
 
 fn accel(s: &str) -> Option<Accelerator> {
@@ -83,6 +86,7 @@ impl MenuBar {
             appearance: Vec::new(),
             xray: CheckMenuItem::new("Show Markdown Source", true, false, accel("Alt+CmdOrCtrl+X")),
             needs_file: Vec::new(),
+            synced: None,
         };
         bar.build();
         bar
@@ -268,6 +272,7 @@ impl MenuBar {
         let menu = self.themes.clone();
         self.clear(&menu);
         self.theme_items.clear();
+        self.synced = None;
         let mut was_built_in = true;
         for entry in themes {
             if was_built_in && entry.path.is_some() {
@@ -280,13 +285,20 @@ impl MenuBar {
             self.theme_items.push((entry.name.clone(), item));
         }
         self.themes.append(&PredefinedMenuItem::separator()).unwrap();
+        let browse = self.item("Browse Themes…", "Shift+CmdOrCtrl+T", Command::BrowseThemes);
+        self.themes.append(&browse).unwrap();
         let open = self.item("Open Themes Folder", "", Command::OpenThemesFolder);
         let reload = self.item("Reload Themes", "", Command::ReloadThemes);
         self.themes.append_items(&[&open, &reload]).unwrap();
     }
 
-    /// Updates check marks and enabled states.
-    pub fn sync(&self, theme: &str, appearance: Option<&str>, xray: bool, has_file: bool) {
+    /// Updates check marks and enabled states, if they changed since the last call.
+    pub fn sync(&mut self, theme: &str, appearance: Option<&str>, xray: bool, has_file: bool) {
+        let state = (theme.to_owned(), appearance.map(str::to_owned), xray, has_file);
+        if self.synced.as_ref() == Some(&state) {
+            return;
+        }
+        self.synced = Some(state);
         for (name, item) in &self.theme_items {
             item.set_checked(name == theme);
         }
